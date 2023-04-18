@@ -1,0 +1,6 @@
+kind: "Dependencies"
+body: "Update sqlparse requirement from <0.4.4,>=0.2.3 to >=0.2.3,<0.4.5 in /core"
+time: 2023-04-18T15:10:18.00000Z
+custom:
+  Author: dependabot[bot]
+  PR: 7399
