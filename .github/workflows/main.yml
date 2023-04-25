@@ -35,8 +35,8 @@ defaults:
 
 # top-level adjustments can be made here
 env:
-  # number of parallel processes to spawn for python testing
-  PYTHON_TEST_WORKERS: 5
+  # number of parallel processes to spawn for python integratino testing
+  PYTHON_INTEGRATION_TEST_WORKERS: 7
 
 jobs:
   code-quality:
@@ -124,7 +124,7 @@ jobs:
         id: generate-split-groups
         run: |
           MATRIX_JSON="["
-          for B in $(seq 1 ${{ env.PYTHON_TEST_WORKERS }}); do
+          for B in $(seq 1 ${{ env.PYTHON_INTEGRATION_TEST_WORKERS }}); do
               MATRIX_JSON+=$(sed 's/^/"/;s/$/"/' <<< "${B}")
           done
           MATRIX_JSON="${MATRIX_JSON//\"\"/\", \"}"
@@ -137,7 +137,7 @@ jobs:
           INCLUDE=('"python-version":"3.8","os":"windows-latest"' '"python-version":"3.8","os":"macos-latest"' )
           INCLUDE_GROUPS="["
           for include in ${INCLUDE[@]}; do
-              for group in $(seq 1 ${{ env.PYTHON_TEST_WORKERS }}); do
+              for group in $(seq 1 ${{ env.PYTHON_INTEGRATION_TEST_WORKERS }}); do
                   INCLUDE_GROUPS+=$(sed 's/$/, /' <<< "{\"split-group\":\"${group}\",${include}}")
               done
           done
@@ -165,7 +165,7 @@ jobs:
       DBT_TEST_USER_1: dbt_test_user_1
       DBT_TEST_USER_2: dbt_test_user_2
       DBT_TEST_USER_3: dbt_test_user_3
-      COVERAGE_FILE: ".coverage.${{ matrix.split-group }}"
+      COVERAGE_FILE: ".coverage_${{ matrix.split-group }}"
 
     steps:
       - name: Check out the repository
@@ -199,7 +199,7 @@ jobs:
         run: |
           tox
         env:
-          PYTEST_ADDOPTS: ${{ format('-v --color=yes -n4 --csv integration_results_{0}.csv --splits {1} --group {2}', matrix.split-group, env.PYTHON_TEST_WORKERS, matrix.split-group) }}
+          PYTEST_ADDOPTS: ${{ format('-v --color=yes -n4 --csv integration_results_{0}.csv --splits {1} --group {2}', matrix.split-group, env.PYTHON_INTEGRATION_TEST_WORKERS, matrix.split-group) }}
 
       - name: Get current date
         if: always()
@@ -224,7 +224,7 @@ jobs:
         if: always()
         with:
           name: integration_coverage_${{ matrix.python-version }}_${{ matrix.os }}
-          path: .coverage.${{ matrix.split-group }}
+          path: .coverage_${{ matrix.split-group }}
 
   build:
     name: build packages
