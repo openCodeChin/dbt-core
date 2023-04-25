@@ -11,14 +11,11 @@ import dbt.exceptions
 import dbt.semver
 
 from dbt.ui import green, red, yellow
-from dbt import flags
 
 PYPI_VERSION_URL = "https://pypi.org/pypi/dbt-core/json"
 
 
 def get_version_information() -> str:
-    flags.USE_COLORS = True if not flags.USE_COLORS else None
-
     installed = get_installed_version()
     latest = get_latest_version()
 
@@ -45,7 +42,7 @@ def get_latest_version(
     version_url: str = PYPI_VERSION_URL,
 ) -> Optional[dbt.semver.VersionSpecifier]:
     try:
-        resp = requests.get(version_url)
+        resp = requests.get(version_url, timeout=1)
         data = resp.json()
         version_string = data["info"]["version"]
     except (json.JSONDecodeError, KeyError, requests.RequestException):
@@ -235,5 +232,5 @@ def _get_adapter_plugin_names() -> Iterator[str]:
             yield plugin_name
 
 
-__version__ = "1.5.0a1"
+__version__ = "1.6.0a1"
 installed = get_installed_version()

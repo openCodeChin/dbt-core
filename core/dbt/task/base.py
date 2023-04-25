@@ -3,11 +3,15 @@ import threading
 import time
 import traceback
 from abc import ABCMeta, abstractmethod
-from typing import Type, Union, Dict, Any, Optional
+from contextlib import nullcontext
 from datetime import datetime
+from typing import Type, Union, Dict, Any, Optional
 
+import dbt.exceptions
 from dbt import tracking
-from dbt import flags
+from dbt.adapters.factory import get_adapter
+from dbt.config import RuntimeConfig, Project
+from dbt.config.profile import read_profile
 from dbt.contracts.graph.manifest import Manifest
 from dbt.contracts.results import (
     NodeStatus,
@@ -16,13 +20,7 @@ from dbt.contracts.results import (
     RunStatus,
     RunningStatus,
 )
-from dbt.exceptions import (
-    NotImplementedError,
-    CompilationError,
-    DbtRuntimeError,
-    DbtInternalError,
-)
-from dbt.logger import log_manager
+from dbt.events.contextvars import get_node_info
 from dbt.events.functions import fire_event
 from dbt.events.types import (
     LogDbtProjectError,
@@ -37,13 +35,16 @@ from dbt.events.types import (
     NodeCompiling,
     NodeExecuting,
 )
-from dbt.events.contextvars import get_node_info
+from dbt.exceptions import (
+    NotImplementedError,
+    CompilationError,
+    DbtRuntimeError,
+    DbtInternalError,
+)
+from dbt.flags import get_flags
+from dbt.graph import Graph
+from dbt.logger import log_manager
 from .printer import print_run_result_error
-
-from dbt.adapters.factory import register_adapter
-from dbt.config import RuntimeConfig, Project
-from dbt.config.profile import read_profile
-import dbt.exceptions
 
 
 class NoneConfig:
@@ -55,7 +56,7 @@ class NoneConfig:
 def read_profiles(profiles_dir=None):
     """This is only used for some error handling"""
     if profiles_dir is None:
-        profiles_dir = flags.PROFILES_DIR
+        profiles_dir = get_flags().PROFILES_DIR
 
     raw_profiles = read_profile(profiles_dir)
 
@@ -70,10 +71,10 @@ def read_profiles(profiles_dir=None):
 class BaseTask(metaclass=ABCMeta):
     ConfigType: Union[Type[NoneConfig], Type[Project]] = NoneConfig
 
-    def __init__(self, args, config):
+    def __init__(self, args, config, project=None):
         self.args = args
-        self.args.single_threaded = False
         self.config = config
+        self.project = config if isinstance(config, Project) else project
 
     @classmethod
     def pre_init_hook(cls, args):
@@ -85,16 +86,15 @@ class BaseTask(metaclass=ABCMeta):
 
     @classmethod
     def set_log_format(cls):
-        if flags.LOG_FORMAT == "json":
+        if get_flags().LOG_FORMAT == "json":
             log_manager.format_json()
         else:
             log_manager.format_text()
 
     @classmethod
-    def from_args(cls, args):
+    def from_args(cls, args, *pargs, **kwargs):
         try:
-            # This is usually RuntimeConfig but will be UnsetProfileConfig
-            # for the clean or deps tasks
+            # This is usually RuntimeConfig
             config = cls.ConfigType.from_args(args)
         except dbt.exceptions.DbtProjectError as exc:
             fire_event(LogDbtProjectError(exc=str(exc)))
@@ -102,11 +102,11 @@ class BaseTask(metaclass=ABCMeta):
             tracking.track_invalid_invocation(args=args, result_type=exc.result_type)
             raise dbt.exceptions.DbtRuntimeError("Could not run dbt") from exc
         except dbt.exceptions.DbtProfileError as exc:
-            all_profile_names = list(read_profiles(flags.PROFILES_DIR).keys())
+            all_profile_names = list(read_profiles(get_flags().PROFILES_DIR).keys())
             fire_event(LogDbtProfileError(exc=str(exc), profiles=all_profile_names))
             tracking.track_invalid_invocation(args=args, result_type=exc.result_type)
             raise dbt.exceptions.DbtRuntimeError("Could not run dbt") from exc
-        return cls(args, config)
+        return cls(args, config, *pargs, **kwargs)
 
     @abstractmethod
     def run(self):
@@ -116,13 +116,13 @@ class BaseTask(metaclass=ABCMeta):
         return True
 
 
-def get_nearest_project_dir(args):
+def get_nearest_project_dir(project_dir: Optional[str]) -> str:
     # If the user provides an explicit project directory, use that
     # but don't look at parent directories.
-    if args.project_dir:
-        project_file = os.path.join(args.project_dir, "dbt_project.yml")
+    if project_dir:
+        project_file = os.path.join(project_dir, "dbt_project.yml")
         if os.path.exists(project_file):
-            return args.project_dir
+            return project_dir
         else:
             raise dbt.exceptions.DbtRuntimeError(
                 "fatal: Invalid --project-dir flag. Not a dbt project. "
@@ -144,23 +144,42 @@ def get_nearest_project_dir(args):
     )
 
 
-def move_to_nearest_project_dir(args):
-    nearest_project_dir = get_nearest_project_dir(args)
+def move_to_nearest_project_dir(project_dir: Optional[str]) -> str:
+    nearest_project_dir = get_nearest_project_dir(project_dir)
     os.chdir(nearest_project_dir)
     return nearest_project_dir
 
 
+# TODO: look into deprecating this class in favor of several small functions that
+# produce the same behavior. currently this class only contains manifest compilation,
+# holding a manifest, and moving direcories.
 class ConfiguredTask(BaseTask):
     ConfigType = RuntimeConfig
 
-    def __init__(self, args, config):
+    def __init__(self, args, config, manifest: Optional[Manifest] = None):
         super().__init__(args, config)
-        register_adapter(self.config)
+        self.graph: Optional[Graph] = None
+        self.manifest = manifest
+
+    def compile_manifest(self):
+        if self.manifest is None:
+            raise DbtInternalError("compile_manifest called before manifest was loaded")
+
+        start_compile_manifest = time.perf_counter()
+
+        # we cannot get adapter in init since it will break rpc #5579
+        adapter = get_adapter(self.config)
+        compiler = adapter.get_compiler()
+        self.graph = compiler.compile(self.manifest)
+
+        compile_time = time.perf_counter() - start_compile_manifest
+        if dbt.tracking.active_user is not None:
+            dbt.tracking.track_runnable_timing({"graph_compilation_elapsed": compile_time})
 
     @classmethod
-    def from_args(cls, args):
-        move_to_nearest_project_dir(args)
-        return super().from_args(args)
+    def from_args(cls, args, *pargs, **kwargs):
+        move_to_nearest_project_dir(args.project_dir)
+        return super().from_args(args, *pargs, **kwargs)
 
 
 class ExecutionContext:
@@ -183,6 +202,8 @@ class BaseRunner(metaclass=ABCMeta):
 
         self.skip = False
         self.skip_cause: Optional[RunResult] = None
+
+        self.run_ephemeral_models = False
 
     @abstractmethod
     def compile(self, manifest: Manifest) -> Any:
@@ -290,33 +311,30 @@ class BaseRunner(metaclass=ABCMeta):
 
     def compile_and_execute(self, manifest, ctx):
         result = None
-        with self.adapter.connection_for(self.node):
+        with self.adapter.connection_for(self.node) if get_flags().INTROSPECT else nullcontext():
             ctx.node.update_event_status(node_status=RunningStatus.Compiling)
             fire_event(
                 NodeCompiling(
                     node_info=ctx.node.node_info,
                 )
             )
-            with collect_timing_info("compile") as timing_info:
+            with collect_timing_info("compile", ctx.timing.append):
                 # if we fail here, we still have a compiled node to return
                 # this has the benefit of showing a build path for the errant
                 # model
                 ctx.node = self.compile(manifest)
-            ctx.timing.append(timing_info)
 
             # for ephemeral nodes, we only want to compile, not run
-            if not ctx.node.is_ephemeral_model:
+            if not ctx.node.is_ephemeral_model or self.run_ephemeral_models:
                 ctx.node.update_event_status(node_status=RunningStatus.Executing)
                 fire_event(
                     NodeExecuting(
                         node_info=ctx.node.node_info,
                     )
                 )
-                with collect_timing_info("execute") as timing_info:
+                with collect_timing_info("execute", ctx.timing.append):
                     result = self.run(ctx.node, manifest)
                     ctx.node = result.node
-
-                ctx.timing.append(timing_info)
 
         return result
 
@@ -381,8 +399,7 @@ class BaseRunner(metaclass=ABCMeta):
                 error = exc_str
 
         if error is not None:
-            # we could include compile time for runtime errors here
-            result = self.error_result(ctx.node, error, started, [])
+            result = self.error_result(ctx.node, error, started, ctx.timing)
         elif result is not None:
             result = self.from_run_result(result, started, ctx.timing)
         else:

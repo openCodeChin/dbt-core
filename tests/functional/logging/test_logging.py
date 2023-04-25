@@ -2,6 +2,8 @@ import pytest
 from dbt.tests.util import run_dbt, get_manifest, read_file
 import json
 import os
+from dbt.events.functions import fire_event
+from dbt.events.types import InvalidOptionYAML
 
 
 my_model_sql = """
@@ -44,6 +46,7 @@ def test_basic(project, logs_dir):
             node_start = True
         if log_event == "NodeFinished":
             node_finished = True
+            assert log_data["run_result"]["adapter_response"]
         if node_start and not node_finished:
             if log_event == "NodeExecuting":
                 assert "node_info" in log_data
@@ -63,3 +66,17 @@ def test_basic(project, logs_dir):
         for data in connection_reused_data:
             assert "conn_name" in data and data["conn_name"]
             assert "orig_conn_name" in data and data["orig_conn_name"]
+
+
+def test_invalid_event_value(project, logs_dir):
+    results = run_dbt(["--log-format=json", "run"])
+    assert len(results) == 1
+    with pytest.raises(Exception):
+        # This should raise because positional arguments are provided to the event
+        fire_event(InvalidOptionYAML("testing"))
+
+    # Provide invalid type to "option_name"
+    with pytest.raises(Exception) as excinfo:
+        fire_event(InvalidOptionYAML(option_name=1))
+
+    assert str(excinfo.value) == "[InvalidOptionYAML]: Unable to parse dict {'option_name': 1}"

@@ -4,8 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from dbt.adapters.reference_keys import (
     _make_ref_key,
-    _make_ref_key_msg,
-    _make_msg_from_ref_key,
+    _make_ref_key_dict,
     _ReferenceKey,
 )
 from dbt.exceptions import (
@@ -17,7 +16,7 @@ from dbt.exceptions import (
 )
 from dbt.events.functions import fire_event, fire_event_if
 from dbt.events.types import CacheAction, CacheDumpGraph
-import dbt.flags as flags
+from dbt.flags import get_flags
 from dbt.utils import lowercase
 
 
@@ -230,7 +229,7 @@ class RelationsCache:
         # self.relations or any cache entry's referenced_by during iteration
         # it's a runtime error!
         with self.lock:
-            return {dot_separated(k): v.dump_graph_entry() for k, v in self.relations.items()}
+            return {dot_separated(k): str(v.dump_graph_entry()) for k, v in self.relations.items()}
 
     def _setdefault(self, relation: _CachedRelation):
         """Add a relation to the cache, or return it if it already exists.
@@ -290,8 +289,8 @@ class RelationsCache:
             # a link - we will never drop the referenced relation during a run.
             fire_event(
                 CacheAction(
-                    ref_key=_make_msg_from_ref_key(ref_key),
-                    ref_key_2=_make_msg_from_ref_key(dep_key),
+                    ref_key=ref_key._asdict(),
+                    ref_key_2=dep_key._asdict(),
                 )
             )
             return
@@ -306,8 +305,8 @@ class RelationsCache:
         fire_event(
             CacheAction(
                 action="add_link",
-                ref_key=_make_msg_from_ref_key(dep_key),
-                ref_key_2=_make_msg_from_ref_key(ref_key),
+                ref_key=dep_key._asdict(),
+                ref_key_2=ref_key._asdict(),
             )
         )
         with self.lock:
@@ -319,12 +318,13 @@ class RelationsCache:
 
         :param BaseRelation relation: The underlying relation.
         """
+        flags = get_flags()
         cached = _CachedRelation(relation)
         fire_event_if(
             flags.LOG_CACHE_EVENTS,
             lambda: CacheDumpGraph(before_after="before", action="adding", dump=self.dump_graph()),
         )
-        fire_event(CacheAction(action="add_relation", ref_key=_make_ref_key_msg(cached)))
+        fire_event(CacheAction(action="add_relation", ref_key=_make_ref_key_dict(cached)))
 
         with self.lock:
             self._setdefault(cached)
@@ -358,7 +358,7 @@ class RelationsCache:
         :param str identifier: The identifier of the relation to drop.
         """
         dropped_key = _make_ref_key(relation)
-        dropped_key_msg = _make_ref_key_msg(relation)
+        dropped_key_msg = _make_ref_key_dict(relation)
         fire_event(CacheAction(action="drop_relation", ref_key=dropped_key_msg))
         with self.lock:
             if dropped_key not in self.relations:
@@ -366,7 +366,7 @@ class RelationsCache:
                 return
             consequences = self.relations[dropped_key].collect_consequences()
             # convert from a list of _ReferenceKeys to a list of ReferenceKeyMsgs
-            consequence_msgs = [_make_msg_from_ref_key(key) for key in consequences]
+            consequence_msgs = [key._asdict() for key in consequences]
             fire_event(
                 CacheAction(
                     action="drop_cascade", ref_key=dropped_key_msg, ref_list=consequence_msgs
@@ -396,9 +396,9 @@ class RelationsCache:
                 fire_event(
                     CacheAction(
                         action="update_reference",
-                        ref_key=_make_ref_key_msg(old_key),
-                        ref_key_2=_make_ref_key_msg(new_key),
-                        ref_key_3=_make_ref_key_msg(cached.key()),
+                        ref_key=_make_ref_key_dict(old_key),
+                        ref_key_2=_make_ref_key_dict(new_key),
+                        ref_key_3=_make_ref_key_dict(cached.key()),
                     )
                 )
 
@@ -429,9 +429,7 @@ class RelationsCache:
             raise TruncatedModelNameCausedCollisionError(new_key, self.relations)
 
         if old_key not in self.relations:
-            fire_event(
-                CacheAction(action="temporary_relation", ref_key=_make_msg_from_ref_key(old_key))
-            )
+            fire_event(CacheAction(action="temporary_relation", ref_key=old_key._asdict()))
             return False
         return True
 
@@ -452,11 +450,11 @@ class RelationsCache:
         fire_event(
             CacheAction(
                 action="rename_relation",
-                ref_key=_make_msg_from_ref_key(old_key),
-                ref_key_2=_make_msg_from_ref_key(new),
+                ref_key=old_key._asdict(),
+                ref_key_2=new_key._asdict(),
             )
         )
-
+        flags = get_flags()
         fire_event_if(
             flags.LOG_CACHE_EVENTS,
             lambda: CacheDumpGraph(before_after="before", action="rename", dump=self.dump_graph()),

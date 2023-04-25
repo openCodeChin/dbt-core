@@ -1,12 +1,11 @@
-betterproto[compiler]==1.2.5
-black==22.10.0
+black==23.3.0
 bumpversion
 docutils
 flake8
 flaky
 freezegun==0.3.12
 ipdb
-mypy==0.971
+mypy==0.981
 pip-tools
 pre-commit
 protobuf
@@ -18,7 +17,6 @@ pytest-logbook
 pytest-mock
 pytest-split
 pytest-xdist
-pytz
 sphinx
 tox>=3.13
 twine

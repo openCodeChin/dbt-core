@@ -1,4 +1,5 @@
 import abc
+from fnmatch import fnmatch
 from itertools import chain
 from pathlib import Path
 from typing import Set, List, Dict, Iterator, Tuple, Any, Union, Type, Optional, Callable
@@ -16,7 +17,9 @@ from dbt.contracts.graph.nodes import (
     SourceDefinition,
     ResultNode,
     ManifestNode,
+    ModelNode,
 )
+from dbt.contracts.graph.unparsed import UnparsedVersion
 from dbt.contracts.state import PreviousState
 from dbt.exceptions import (
     DbtInternalError,
@@ -32,6 +35,7 @@ SELECTOR_DELIMITER = ":"
 class MethodName(StrEnum):
     FQN = "fqn"
     Tag = "tag"
+    Group = "group"
     Source = "source"
     Path = "path"
     File = "file"
@@ -45,27 +49,47 @@ class MethodName(StrEnum):
     Metric = "metric"
     Result = "result"
     SourceStatus = "source_status"
+    Wildcard = "wildcard"
+    Version = "version"
 
 
-def is_selected_node(fqn: List[str], node_selector: str):
-
+def is_selected_node(fqn: List[str], node_selector: str, is_versioned: bool) -> bool:
     # If qualified_name exactly matches model name (fqn's leaf), return True
-    if fqn[-1] == node_selector:
-        return True
+    if is_versioned:
+        flat_node_selector = node_selector.split(".")
+        if fqn[-2] == node_selector:
+            return True
+        # If this is a versioned model, then the last two segments should be allowed to exactly match
+        elif fqn[-2:] == flat_node_selector[-2:]:
+            return True
+    else:
+        if fqn[-1] == node_selector:
+            return True
     # Flatten node parts. Dots in model names act as namespace separators
     flat_fqn = [item for segment in fqn for item in segment.split(".")]
     # Selector components cannot be more than fqn's
     if len(flat_fqn) < len(node_selector.split(".")):
         return False
 
+    slurp_from_ix: Optional[int] = None
     for i, selector_part in enumerate(node_selector.split(".")):
-        # if we hit a GLOB, then this node is selected
-        if selector_part == SELECTOR_GLOB:
-            return True
+        if any(wildcard in selector_part for wildcard in ("*", "?", "[", "]")):
+            slurp_from_ix = i
+            break
         elif flat_fqn[i] == selector_part:
             continue
         else:
             return False
+
+    if slurp_from_ix is not None:
+        # If we have a wildcard, we need to make sure that the selector matches the
+        # rest of the fqn, this is 100% backwards compatible with the old behavior of
+        # encountering a wildcard but more expressive in naturally allowing you to
+        # match the rest of the fqn with more advanced patterns
+        return fnmatch(
+            ".".join(flat_fqn[slurp_from_ix:]),
+            ".".join(node_selector.split(".")[slurp_from_ix:]),
+        )
 
     # if we get all the way down here, then the node is a match
     return True
@@ -143,6 +167,15 @@ class SelectorMethod(metaclass=abc.ABCMeta):
             self.metric_nodes(included_nodes),
         )
 
+    def groupable_nodes(
+        self,
+        included_nodes: Set[UniqueId],
+    ) -> Iterator[Tuple[UniqueId, Union[ManifestNode, Metric]]]:
+        yield from chain(
+            self.parsed_nodes(included_nodes),
+            self.metric_nodes(included_nodes),
+        )
+
     @abc.abstractmethod
     def search(
         self,
@@ -153,7 +186,7 @@ class SelectorMethod(metaclass=abc.ABCMeta):
 
 
 class QualifiedNameSelectorMethod(SelectorMethod):
-    def node_is_match(self, qualified_name: str, fqn: List[str]) -> bool:
+    def node_is_match(self, qualified_name: str, fqn: List[str], is_versioned: bool) -> bool:
         """Determine if a qualified name matches an fqn for all package
         names in the graph.
 
@@ -162,10 +195,10 @@ class QualifiedNameSelectorMethod(SelectorMethod):
         """
         unscoped_fqn = fqn[1:]
 
-        if is_selected_node(fqn, qualified_name):
+        if is_selected_node(fqn, qualified_name, is_versioned):
             return True
         # Match nodes across different packages
-        elif is_selected_node(unscoped_fqn, qualified_name):
+        elif is_selected_node(unscoped_fqn, qualified_name, is_versioned):
             return True
 
         return False
@@ -177,7 +210,7 @@ class QualifiedNameSelectorMethod(SelectorMethod):
         """
         parsed_nodes = list(self.parsed_nodes(included_nodes))
         for node, real_node in parsed_nodes:
-            if self.node_is_match(selector, real_node.fqn):
+            if self.node_is_match(selector, real_node.fqn, real_node.is_versioned):
                 yield node
 
 
@@ -185,7 +218,15 @@ class TagSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """yields nodes from included that have the specified tag"""
         for node, real_node in self.all_nodes(included_nodes):
-            if selector in real_node.tags:
+            if any(fnmatch(tag, selector) for tag in real_node.tags):
+                yield node
+
+
+class GroupSelectorMethod(SelectorMethod):
+    def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
+        """yields nodes from included in the specified group"""
+        for node, real_node in self.groupable_nodes(included_nodes):
+            if selector == real_node.config.get("group"):
                 yield node
 
 
@@ -195,7 +236,7 @@ class SourceSelectorMethod(SelectorMethod):
         parts = selector.split(".")
         target_package = SELECTOR_GLOB
         if len(parts) == 1:
-            target_source, target_table = parts[0], None
+            target_source, target_table = parts[0], SELECTOR_GLOB
         elif len(parts) == 2:
             target_source, target_table = parts
         elif len(parts) == 3:
@@ -210,13 +251,12 @@ class SourceSelectorMethod(SelectorMethod):
             raise DbtRuntimeError(msg)
 
         for node, real_node in self.source_nodes(included_nodes):
-            if target_package not in (real_node.package_name, SELECTOR_GLOB):
+            if not fnmatch(real_node.package_name, target_package):
                 continue
-            if target_source not in (real_node.source_name, SELECTOR_GLOB):
+            if not fnmatch(real_node.source_name, target_source):
                 continue
-            if target_table not in (None, real_node.name, SELECTOR_GLOB):
+            if not fnmatch(real_node.name, target_table):
                 continue
-
             yield node
 
 
@@ -237,9 +277,9 @@ class ExposureSelectorMethod(SelectorMethod):
             raise DbtRuntimeError(msg)
 
         for node, real_node in self.exposure_nodes(included_nodes):
-            if target_package not in (real_node.package_name, SELECTOR_GLOB):
+            if not fnmatch(real_node.package_name, target_package):
                 continue
-            if target_name not in (real_node.name, SELECTOR_GLOB):
+            if not fnmatch(real_node.name, target_name):
                 continue
 
             yield node
@@ -262,9 +302,9 @@ class MetricSelectorMethod(SelectorMethod):
             raise DbtRuntimeError(msg)
 
         for node, real_node in self.metric_nodes(included_nodes):
-            if target_package not in (real_node.package_name, SELECTOR_GLOB):
+            if not fnmatch(real_node.package_name, target_package):
                 continue
-            if target_name not in (real_node.name, SELECTOR_GLOB):
+            if not fnmatch(real_node.name, target_name):
                 continue
 
             yield node
@@ -280,7 +320,12 @@ class PathSelectorMethod(SelectorMethod):
             ofp = Path(real_node.original_file_path)
             if ofp in paths:
                 yield node
-            elif any(parent in paths for parent in ofp.parents):
+            if hasattr(real_node, "patch_path") and real_node.patch_path:  # type: ignore
+                pfp = real_node.patch_path.split("://")[1]  # type: ignore
+                ymlfp = Path(pfp)
+                if ymlfp in paths:
+                    yield node
+            if any(parent in paths for parent in ofp.parents):
                 yield node
 
 
@@ -288,7 +333,7 @@ class FileSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """Yields nodes from included that match the given file name."""
         for node, real_node in self.all_nodes(included_nodes):
-            if Path(real_node.original_file_path).name == selector:
+            if fnmatch(Path(real_node.original_file_path).name, selector):
                 yield node
 
 
@@ -296,7 +341,7 @@ class PackageSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         """Yields nodes from included that have the specified package"""
         for node, real_node in self.all_nodes(included_nodes):
-            if real_node.package_name == selector:
+            if fnmatch(real_node.package_name, selector):
                 yield node
 
 
@@ -377,7 +422,7 @@ class TestNameSelectorMethod(SelectorMethod):
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         for node, real_node in self.parsed_nodes(included_nodes):
             if real_node.resource_type == NodeType.Test and hasattr(real_node, "test_metadata"):
-                if real_node.test_metadata.name == selector:  # type: ignore[union-attr]
+                if fnmatch(real_node.test_metadata.name, selector):  # type: ignore[union-attr]
                     yield node
 
 
@@ -510,6 +555,7 @@ class StateSelectorMethod(SelectorMethod):
             ),
             "modified.relation": self.check_modified_factory("same_database_representation"),
             "modified.macros": self.check_modified_macros,
+            "modified.contract": self.check_modified_factory("same_contract"),
         }
         if selector in state_checks:
             checker = state_checks[selector]
@@ -601,10 +647,43 @@ class SourceStatusSelectorMethod(SelectorMethod):
                 yield node
 
 
+class VersionSelectorMethod(SelectorMethod):
+    def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
+        for node, real_node in self.parsed_nodes(included_nodes):
+            if isinstance(real_node, ModelNode):
+                if selector == "latest":
+                    if real_node.is_latest_version:
+                        yield node
+                elif selector == "prerelease":
+                    if (
+                        real_node.version
+                        and real_node.latest_version
+                        and UnparsedVersion(v=real_node.version)
+                        > UnparsedVersion(v=real_node.latest_version)
+                    ):
+                        yield node
+                elif selector == "old":
+                    if (
+                        real_node.version
+                        and real_node.latest_version
+                        and UnparsedVersion(v=real_node.version)
+                        < UnparsedVersion(v=real_node.latest_version)
+                    ):
+                        yield node
+                elif selector == "none":
+                    if real_node.version is None:
+                        yield node
+                else:
+                    raise DbtRuntimeError(
+                        f'Invalid version type selector {selector}: expected one of: "latest", "prerelease", "old", or "none"'
+                    )
+
+
 class MethodManager:
     SELECTOR_METHODS: Dict[MethodName, Type[SelectorMethod]] = {
         MethodName.FQN: QualifiedNameSelectorMethod,
         MethodName.Tag: TagSelectorMethod,
+        MethodName.Group: GroupSelectorMethod,
         MethodName.Source: SourceSelectorMethod,
         MethodName.Path: PathSelectorMethod,
         MethodName.File: FileSelectorMethod,
@@ -618,6 +697,7 @@ class MethodManager:
         MethodName.Metric: MetricSelectorMethod,
         MethodName.Result: ResultSelectorMethod,
         MethodName.SourceStatus: SourceStatusSelectorMethod,
+        MethodName.Version: VersionSelectorMethod,
     }
 
     def __init__(

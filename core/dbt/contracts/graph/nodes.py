@@ -1,6 +1,9 @@
 import os
 import time
 from dataclasses import dataclass, field
+from enum import Enum
+import hashlib
+
 from mashumaro.types import SerializableType
 from typing import (
     Optional,
@@ -18,36 +21,36 @@ from dbt.dataclass_schema import dbtClassMixin, ExtensibleDbtClassMixin
 from dbt.clients.system import write_file
 from dbt.contracts.files import FileHash
 from dbt.contracts.graph.unparsed import (
-    Quoting,
     Docs,
-    FreshnessThreshold,
+    ExposureType,
     ExternalTable,
+    FreshnessThreshold,
     HasYamlMetadata,
     MacroArgument,
-    UnparsedSourceDefinition,
-    UnparsedSourceTableDefinition,
-    UnparsedColumn,
-    TestDef,
-    ExposureOwner,
-    ExposureType,
     MaturityType,
     MetricFilter,
     MetricTime,
+    Owner,
+    Quoting,
+    TestDef,
+    NodeVersion,
+    UnparsedSourceDefinition,
+    UnparsedSourceTableDefinition,
+    UnparsedColumn,
 )
 from dbt.contracts.util import Replaceable, AdditionalPropertiesMixin
-from dbt.events.proto_types import NodeInfo
 from dbt.events.functions import warn_or_error
+from dbt.exceptions import ParsingError, InvalidAccessTypeError, ContractBreakingChangeError
 from dbt.events.types import (
     SeedIncreased,
     SeedExceedsLimitSamePath,
     SeedExceedsLimitAndPathChanged,
     SeedExceedsLimitChecksumChanged,
+    ValidationWarning,
 )
 from dbt.events.contextvars import set_contextvars
-from dbt import flags
-from dbt.node_types import ModelLanguage, NodeType
-from dbt.utils import cast_dict_to_dict_of_strings
-
+from dbt.flags import get_flags
+from dbt.node_types import ModelLanguage, NodeType, AccessType
 
 from .model_config import (
     NodeConfig,
@@ -59,6 +62,7 @@ from .model_config import (
     EmptySnapshotConfig,
     SnapshotConfig,
 )
+
 
 # =====================================================================
 # This contains the classes for all of the nodes and node-like objects
@@ -116,6 +120,10 @@ class BaseNode(dbtClassMixin, Replaceable):
         return self.resource_type in NodeType.refable()
 
     @property
+    def is_versioned(self):
+        return self.resource_type in NodeType.versioned() and self.version is not None
+
+    @property
     def is_ephemeral(self):
         return self.config.materialized == "ephemeral"
 
@@ -138,6 +146,62 @@ class GraphNode(BaseNode):
 
 
 @dataclass
+class RefArgs(dbtClassMixin):
+    name: str
+    package: Optional[str] = None
+    version: Optional[NodeVersion] = None
+
+    @property
+    def positional_args(self) -> List[str]:
+        if self.package:
+            return [self.package, self.name]
+        else:
+            return [self.name]
+
+    @property
+    def keyword_args(self) -> Dict[str, Optional[NodeVersion]]:
+        if self.version:
+            return {"version": self.version}
+        else:
+            return {}
+
+
+class ConstraintType(str, Enum):
+    check = "check"
+    not_null = "not_null"
+    unique = "unique"
+    primary_key = "primary_key"
+    foreign_key = "foreign_key"
+    custom = "custom"
+
+    @classmethod
+    def is_valid(cls, item):
+        try:
+            cls(item)
+        except ValueError:
+            return False
+        return True
+
+
+@dataclass
+class ColumnLevelConstraint(dbtClassMixin):
+    type: ConstraintType
+    name: Optional[str] = None
+    expression: Optional[str] = None
+    warn_unenforced: bool = (
+        True  # Warn if constraint cannot be enforced by platform but will be in DDL
+    )
+    warn_unsupported: bool = (
+        True  # Warn if constraint is not supported by the platform and won't be in DDL
+    )
+
+
+@dataclass
+class ModelLevelConstraint(ColumnLevelConstraint):
+    columns: List[str] = field(default_factory=list)
+
+
+@dataclass
 class ColumnInfo(AdditionalPropertiesMixin, ExtensibleDbtClassMixin, Replaceable):
     """Used in all ManifestNodes and SourceDefinition"""
 
@@ -145,9 +209,16 @@ class ColumnInfo(AdditionalPropertiesMixin, ExtensibleDbtClassMixin, Replaceable
     description: str = ""
     meta: Dict[str, Any] = field(default_factory=dict)
     data_type: Optional[str] = None
+    constraints: List[ColumnLevelConstraint] = field(default_factory=list)
     quote: Optional[bool] = None
     tags: List[str] = field(default_factory=list)
     _extra: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Contract(dbtClassMixin, Replaceable):
+    enforced: bool = False
+    checksum: Optional[str] = None
 
 
 # Metrics, exposures,
@@ -207,8 +278,6 @@ class NodeInfoMixin:
 
     @property
     def node_info(self):
-        meta = getattr(self, "meta", {})
-        meta_stringified = cast_dict_to_dict_of_strings(meta)
         node_info = {
             "node_path": getattr(self, "path", None),
             "node_name": getattr(self, "name", None),
@@ -218,10 +287,15 @@ class NodeInfoMixin:
             "node_status": str(self._event_status.get("node_status")),
             "node_started_at": self._event_status.get("started_at"),
             "node_finished_at": self._event_status.get("finished_at"),
-            "meta": meta_stringified,
+            "meta": getattr(self, "meta", {}),
+            "node_relation": {
+                "database": getattr(self, "database", None),
+                "schema": getattr(self, "schema", None),
+                "alias": getattr(self, "alias", None),
+                "relation_name": getattr(self, "relation_name", None),
+            },
         }
-        node_info_msg = NodeInfo(**node_info)
-        return node_info_msg
+        return node_info
 
     def update_event_status(self, **kwargs):
         for k, v in kwargs.items():
@@ -238,6 +312,7 @@ class ParsedNode(NodeInfoMixin, ParsedNodeMandatory, SerializableType):
     description: str = field(default="")
     columns: Dict[str, ColumnInfo] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
+    group: Optional[str] = None
     docs: Docs = field(default_factory=Docs)
     patch_path: Optional[str] = None
     build_path: Optional[str] = None
@@ -350,8 +425,18 @@ class ParsedNode(NodeInfoMixin, ParsedNodeMandatory, SerializableType):
             old.unrendered_config,
         )
 
+    def build_contract_checksum(self):
+        pass
+
+    def same_contract(self, old) -> bool:
+        # This would only apply to seeds
+        return True
+
     def patch(self, patch: "ParsedNodePatch"):
         """Given a ParsedNodePatch, add the new information to the node."""
+        # NOTE: Constraint patching is awkwardly done in the parse_patch function
+        # which calls this one. We need to combine the logic.
+
         # explicitly pick out the parts to update so we don't inadvertently
         # step on the model name or anything
         # Note: config should already be updated
@@ -360,17 +445,64 @@ class ParsedNode(NodeInfoMixin, ParsedNodeMandatory, SerializableType):
         self.created_at = time.time()
         self.description = patch.description
         self.columns = patch.columns
+        self.name = patch.name
+
+        # TODO: version, latest_version, and access are specific to ModelNodes, consider splitting out to ModelNode
+        if self.resource_type != NodeType.Model:
+            if patch.version:
+                warn_or_error(
+                    ValidationWarning(
+                        field_name="version",
+                        resource_type=self.resource_type.value,
+                        node_name=patch.name,
+                    )
+                )
+            if patch.latest_version:
+                warn_or_error(
+                    ValidationWarning(
+                        field_name="latest_version",
+                        resource_type=self.resource_type.value,
+                        node_name=patch.name,
+                    )
+                )
+        self.version = patch.version
+        self.latest_version = patch.latest_version
+
+        # This might not be the ideal place to validate the "access" field,
+        # but at this point we have the information we need to properly
+        # validate and we don't before this.
+        if patch.access:
+            if self.resource_type == NodeType.Model:
+                if AccessType.is_valid(patch.access):
+                    self.access = AccessType(patch.access)
+                else:
+                    raise InvalidAccessTypeError(
+                        unique_id=self.unique_id,
+                        field_value=patch.access,
+                    )
+            else:
+                warn_or_error(
+                    ValidationWarning(
+                        field_name="access",
+                        resource_type=self.resource_type.value,
+                        node_name=patch.name,
+                    )
+                )
 
     def same_contents(self, old) -> bool:
         if old is None:
             return False
 
+        # Need to ensure that same_contract is called because it
+        # could throw an error
+        same_contract = self.same_contract(old)
         return (
             self.same_body(old)
             and self.same_config(old)
             and self.same_persisted_description(old)
             and self.same_fqn(old)
             and self.same_database_representation(old)
+            and same_contract
             and True
         )
 
@@ -389,7 +521,7 @@ class CompiledNode(ParsedNode):
     so all ManifestNodes except SeedNode."""
 
     language: str = "sql"
-    refs: List[List[str]] = field(default_factory=list)
+    refs: List[RefArgs] = field(default_factory=list)
     sources: List[List[str]] = field(default_factory=list)
     metrics: List[List[str]] = field(default_factory=list)
     depends_on: DependsOn = field(default_factory=DependsOn)
@@ -399,6 +531,7 @@ class CompiledNode(ParsedNode):
     extra_ctes_injected: bool = False
     extra_ctes: List[InjectedCTE] = field(default_factory=list)
     _pre_injected_sql: Optional[str] = None
+    contract: Contract = field(default_factory=Contract)
 
     @property
     def empty(self):
@@ -409,8 +542,10 @@ class CompiledNode(ParsedNode):
         do if extra_ctes were an OrderedDict
         """
         for cte in self.extra_ctes:
+            # Because it's possible that multiple threads are compiling the
+            # node at the same time, we don't want to overwrite already compiled
+            # sql in the extra_ctes with empty sql.
             if cte.id == cte_id:
-                cte.sql = sql
                 break
         else:
             self.extra_ctes.append(InjectedCTE(id=cte_id, sql=sql))
@@ -437,6 +572,76 @@ class CompiledNode(ParsedNode):
     def depends_on_macros(self):
         return self.depends_on.macros
 
+    def build_contract_checksum(self):
+        # We don't need to construct the checksum if the model does not
+        # have contract enforced, because it won't be used.
+        # This needs to be executed after contract config is set
+        if self.contract.enforced is True:
+            contract_state = ""
+            # We need to sort the columns so that order doesn't matter
+            # columns is a str: ColumnInfo dictionary
+            sorted_columns = sorted(self.columns.values(), key=lambda col: col.name)
+            for column in sorted_columns:
+                contract_state += f"|{column.name}"
+                contract_state += str(column.data_type)
+            data = contract_state.encode("utf-8")
+            self.contract.checksum = hashlib.new("sha256", data).hexdigest()
+
+    def same_contract(self, old) -> bool:
+        # If the contract wasn't previously enforced:
+        if old.contract.enforced is False and self.contract.enforced is False:
+            # No change -- same_contract: True
+            return True
+        if old.contract.enforced is False and self.contract.enforced is True:
+            # Now it's enforced. This is a change, but not a breaking change -- same_contract: False
+            return False
+
+        # Otherwise: The contract was previously enforced, and we need to check for changes.
+        # Happy path: The contract is still being enforced, and the checksums are identical.
+        if self.contract.enforced is True and self.contract.checksum == old.contract.checksum:
+            # No change -- same_contract: True
+            return True
+
+        # Otherwise: There has been a change.
+        # We need to determine if it is a **breaking** change.
+        # These are the categories of breaking changes:
+        contract_enforced_disabled: bool = False
+        columns_removed: List[str] = []
+        column_type_changes: List[Tuple[str, str, str]] = []
+
+        if old.contract.enforced is True and self.contract.enforced is False:
+            # Breaking change: the contract was previously enforced, and it no longer is
+            contract_enforced_disabled = True
+
+        # Next, compare each column from the previous contract (old.columns)
+        for key, value in sorted(old.columns.items()):
+            # Has this column been removed?
+            if key not in self.columns.keys():
+                columns_removed.append(value.name)
+            # Has this column's data type changed?
+            elif value.data_type != self.columns[key].data_type:
+                column_type_changes.append(
+                    (str(value.name), str(value.data_type), str(self.columns[key].data_type))
+                )
+
+        # If a column has been added, it will be missing in the old.columns, and present in self.columns
+        # That's a change (caught by the different checksums), but not a breaking change
+
+        # Did we find any changes that we consider breaking? If so, that's an error
+        if contract_enforced_disabled or columns_removed or column_type_changes:
+            raise (
+                ContractBreakingChangeError(
+                    contract_enforced_disabled=contract_enforced_disabled,
+                    columns_removed=columns_removed,
+                    column_type_changes=column_type_changes,
+                    node=self,
+                )
+            )
+
+        # Otherwise, though we didn't find any *breaking* changes, the contract has still changed -- same_contract: False
+        else:
+            return False
+
 
 # ====================================
 # CompiledNode subclasses
@@ -457,6 +662,21 @@ class HookNode(CompiledNode):
 @dataclass
 class ModelNode(CompiledNode):
     resource_type: NodeType = field(metadata={"restrict": [NodeType.Model]})
+    access: AccessType = AccessType.Protected
+    constraints: List[ModelLevelConstraint] = field(default_factory=list)
+    version: Optional[NodeVersion] = None
+    latest_version: Optional[NodeVersion] = None
+
+    @property
+    def is_latest_version(self) -> bool:
+        return self.version is not None and self.version == self.latest_version
+
+    @property
+    def search_name(self):
+        if self.version is None:
+            return self.name
+        else:
+            return f"{self.name}.v{self.version}"
 
 
 # TODO: rm?
@@ -482,6 +702,7 @@ class SeedNode(ParsedNode):  # No SQLDefaults!
     # seeds need the root_path because the contents are not loaded initially
     # and we need the root_path to load the seed later
     root_path: Optional[str] = None
+    depends_on: MacroDependsOn = field(default_factory=MacroDependsOn)
 
     def same_seeds(self, other: "SeedNode") -> bool:
         # for seeds, we check the hashes. If the hashes are different types,
@@ -523,6 +744,39 @@ class SeedNode(ParsedNode):  # No SQLDefaults!
         """Seeds are never empty"""
         return False
 
+    def _disallow_implicit_dependencies(self):
+        """Disallow seeds to take implicit upstream dependencies via pre/post hooks"""
+        # Seeds are root nodes in the DAG. They cannot depend on other nodes.
+        # However, it's possible to define pre- and post-hooks on seeds, and for those
+        # hooks to include {{ ref(...) }}. This worked in previous versions, but it
+        # was never officially documented or supported behavior. Let's raise an explicit error,
+        # which will surface during parsing if the user has written code such that we attempt
+        # to capture & record a ref/source/metric call on the SeedNode.
+        # For more details: https://github.com/dbt-labs/dbt-core/issues/6806
+        hooks = [f'- pre_hook: "{hook.sql}"' for hook in self.config.pre_hook] + [
+            f'- post_hook: "{hook.sql}"' for hook in self.config.post_hook
+        ]
+        hook_list = "\n".join(hooks)
+        message = f"""
+Seeds cannot depend on other nodes. dbt detected a seed with a pre- or post-hook
+that calls 'ref', 'source', or 'metric', either directly or indirectly via other macros.
+
+Error raised for '{self.unique_id}', which has these hooks defined: \n{hook_list}
+        """
+        raise ParsingError(message)
+
+    @property
+    def refs(self):
+        self._disallow_implicit_dependencies()
+
+    @property
+    def sources(self):
+        self._disallow_implicit_dependencies()
+
+    @property
+    def metrics(self):
+        self._disallow_implicit_dependencies()
+
     def same_body(self, other) -> bool:
         return self.same_seeds(other)
 
@@ -531,8 +785,8 @@ class SeedNode(ParsedNode):  # No SQLDefaults!
         return []
 
     @property
-    def depends_on_macros(self):
-        return []
+    def depends_on_macros(self) -> List[str]:
+        return self.depends_on.macros
 
     @property
     def extra_ctes(self):
@@ -557,7 +811,7 @@ class TestShouldStoreFailures:
     def should_store_failures(self):
         if self.config.store_failures:
             return self.config.store_failures
-        return flags.STORE_FAILURES
+        return get_flags().STORE_FAILURES
 
     @property
     def is_relational(self):
@@ -608,6 +862,7 @@ class GenericTestNode(TestShouldStoreFailures, CompiledNode, HasTestMetadata):
     # Was not able to make mypy happy and keep the code working. We need to
     # refactor the various configs.
     config: TestConfig = field(default_factory=TestConfig)  # type: ignore
+    attached_node: Optional[str] = None
 
     def same_contents(self, other) -> bool:
         if other is None:
@@ -823,7 +1078,7 @@ class SourceDefinition(NodeInfoMixin, ParsedSourceMandatory):
         if old is None:
             return True
 
-        # config changes are changes (because the only config is "enabled", and
+        # config changes are changes (because the only config is "enforced", and
         # enabling a source is a change!)
         # changing the database/schema/identifier is a change
         # messing around with external stuff is a change (uh, right?)
@@ -892,7 +1147,7 @@ class SourceDefinition(NodeInfoMixin, ParsedSourceMandatory):
 @dataclass
 class Exposure(GraphNode):
     type: ExposureType
-    owner: ExposureOwner
+    owner: Owner
     resource_type: NodeType = field(metadata={"restrict": [NodeType.Exposure]})
     description: str = ""
     label: Optional[str] = None
@@ -903,7 +1158,7 @@ class Exposure(GraphNode):
     unrendered_config: Dict[str, Any] = field(default_factory=dict)
     url: Optional[str] = None
     depends_on: DependsOn = field(default_factory=DependsOn)
-    refs: List[List[str]] = field(default_factory=list)
+    refs: List[RefArgs] = field(default_factory=list)
     sources: List[List[str]] = field(default_factory=list)
     metrics: List[List[str]] = field(default_factory=list)
     created_at: float = field(default_factory=lambda: time.time())
@@ -995,9 +1250,10 @@ class Metric(GraphNode):
     unrendered_config: Dict[str, Any] = field(default_factory=dict)
     sources: List[List[str]] = field(default_factory=list)
     depends_on: DependsOn = field(default_factory=DependsOn)
-    refs: List[List[str]] = field(default_factory=list)
+    refs: List[RefArgs] = field(default_factory=list)
     metrics: List[List[str]] = field(default_factory=list)
     created_at: float = field(default_factory=lambda: time.time())
+    group: Optional[str] = None
 
     @property
     def depends_on_nodes(self):
@@ -1066,6 +1322,18 @@ class Metric(GraphNode):
 
 
 # ====================================
+# Group node
+# ====================================
+
+
+@dataclass
+class Group(BaseNode):
+    name: str
+    owner: Owner
+    resource_type: NodeType = field(metadata={"restrict": [NodeType.Group]})
+
+
+# ====================================
 # Patches
 # ====================================
 
@@ -1085,6 +1353,9 @@ class ParsedPatch(HasYamlMetadata, Replaceable):
 @dataclass
 class ParsedNodePatch(ParsedPatch):
     columns: Dict[str, ColumnInfo]
+    access: Optional[str]
+    version: Optional[NodeVersion]
+    latest_version: Optional[NodeVersion]
 
 
 @dataclass
@@ -1133,6 +1404,7 @@ Resource = Union[
     GraphMemberNode,
     Documentation,
     Macro,
+    Group,
 ]
 
 TestNode = Union[

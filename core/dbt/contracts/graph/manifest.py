@@ -29,13 +29,15 @@ from dbt.contracts.graph.nodes import (
     GenericTestNode,
     Exposure,
     Metric,
+    Group,
     UnpatchedSourceDefinition,
     ManifestNode,
     GraphMemberNode,
     ResultNode,
     BaseNode,
 )
-from dbt.contracts.graph.unparsed import SourcePatch
+from dbt.contracts.graph.unparsed import SourcePatch, NodeVersion
+from dbt.contracts.graph.manifest_upgrade import upgrade_manifest_json
 from dbt.contracts.files import SourceFile, SchemaSourceFile, FileHash, AnySourceFile
 from dbt.contracts.util import BaseArtifactMetadata, SourceKey, ArtifactMixin, schema_version
 from dbt.dataclass_schema import dbtClassMixin
@@ -49,7 +51,7 @@ from dbt.helper_types import PathSet
 from dbt.events.functions import fire_event
 from dbt.events.types import MergedFromState
 from dbt.node_types import NodeType
-from dbt import flags
+from dbt.flags import get_flags, MP_CONTEXT
 from dbt import tracking
 import dbt.utils
 
@@ -144,6 +146,7 @@ class SourceLookup(dbtClassMixin):
 class RefableLookup(dbtClassMixin):
     # model, seed, snapshot
     _lookup_types: ClassVar[set] = set(NodeType.refable())
+    _versioned_types: ClassVar[set] = set(NodeType.versioned())
 
     # refables are actually unique, so the Dict[PackageName, UniqueID] will
     # only ever have exactly one value, but doing 3 dict lookups instead of 1
@@ -152,11 +155,19 @@ class RefableLookup(dbtClassMixin):
         self.storage: Dict[str, Dict[PackageName, UniqueID]] = {}
         self.populate(manifest)
 
-    def get_unique_id(self, key, package: Optional[PackageName]):
+    def get_unique_id(self, key, package: Optional[PackageName], version: Optional[NodeVersion]):
+        if version:
+            key = f"{key}.v{version}"
         return find_unique_id_for_package(self.storage, key, package)
 
-    def find(self, key, package: Optional[PackageName], manifest: "Manifest"):
-        unique_id = self.get_unique_id(key, package)
+    def find(
+        self,
+        key,
+        package: Optional[PackageName],
+        version: Optional[NodeVersion],
+        manifest: "Manifest",
+    ):
+        unique_id = self.get_unique_id(key, package, version)
         if unique_id is not None:
             return self.perform_lookup(unique_id, manifest)
         return None
@@ -165,7 +176,15 @@ class RefableLookup(dbtClassMixin):
         if node.resource_type in self._lookup_types:
             if node.name not in self.storage:
                 self.storage[node.name] = {}
-            self.storage[node.name][node.package_name] = node.unique_id
+
+            if node.is_versioned:
+                if node.search_name not in self.storage:
+                    self.storage[node.search_name] = {}
+                self.storage[node.search_name][node.package_name] = node.unique_id
+                if node.is_latest_version:  # type: ignore
+                    self.storage[node.name][node.package_name] = node.unique_id
+            else:
+                self.storage[node.name][node.package_name] = node.unique_id
 
     def populate(self, manifest):
         for node in manifest.nodes.values():
@@ -231,7 +250,12 @@ class DisabledLookup(dbtClassMixin):
 
     # This should return a list of disabled nodes. It's different from
     # the other Lookup functions in that it returns full nodes, not just unique_ids
-    def find(self, search_name, package: Optional[PackageName]):
+    def find(
+        self, search_name, package: Optional[PackageName], version: Optional[NodeVersion] = None
+    ):
+        if version:
+            search_name = f"{search_name}.v{version}"
+
         if search_name not in self.storage:
             return None
 
@@ -250,6 +274,7 @@ class DisabledLookup(dbtClassMixin):
 
 class AnalysisLookup(RefableLookup):
     _lookup_types: ClassVar[set] = set([NodeType.Analysis])
+    _versioned_types: ClassVar[set] = set()
 
 
 def _search_packages(
@@ -303,7 +328,7 @@ class ManifestMetadata(BaseArtifactMetadata):
             self.user_id = tracking.active_user.id
 
         if self.send_anonymous_usage_stats is None:
-            self.send_anonymous_usage_stats = flags.SEND_ANONYMOUS_USAGE_STATS
+            self.send_anonymous_usage_stats = get_flags().SEND_ANONYMOUS_USAGE_STATS
 
     @classmethod
     def default(cls):
@@ -599,6 +624,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
     docs: MutableMapping[str, Documentation] = field(default_factory=dict)
     exposures: MutableMapping[str, Exposure] = field(default_factory=dict)
     metrics: MutableMapping[str, Metric] = field(default_factory=dict)
+    groups: MutableMapping[str, Group] = field(default_factory=dict)
     selectors: MutableMapping[str, Any] = field(default_factory=dict)
     files: MutableMapping[str, AnySourceFile] = field(default_factory=dict)
     metadata: ManifestMetadata = field(default_factory=ManifestMetadata)
@@ -631,7 +657,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
         metadata={"serialize": lambda x: None, "deserialize": lambda x: None},
     )
     _lock: Lock = field(
-        default_factory=flags.MP_CONTEXT.Lock,
+        default_factory=MP_CONTEXT.Lock,
         metadata={"serialize": lambda x: None, "deserialize": lambda x: None},
     )
 
@@ -643,26 +669,8 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
 
     @classmethod
     def __post_deserialize__(cls, obj):
-        obj._lock = flags.MP_CONTEXT.Lock()
+        obj._lock = MP_CONTEXT.Lock()
         return obj
-
-    def sync_update_node(self, new_node: ManifestNode) -> ManifestNode:
-        """update the node with a lock. The only time we should want to lock is
-        when compiling an ephemeral ancestor of a node at runtime, because
-        multiple threads could be just-in-time compiling the same ephemeral
-        dependency, and we want them to have a consistent view of the manifest.
-
-        If the existing node is not compiled, update it with the new node and
-        return that. If the existing node is compiled, do not update the
-        manifest and return the existing node.
-        """
-        with self._lock:
-            existing = self.nodes[new_node.unique_id]
-            if getattr(existing, "compiled", False):
-                # already compiled
-                return existing
-            _update_into(self.nodes, new_node)
-            return new_node
 
     def update_exposure(self, new_exposure: Exposure):
         _update_into(self.exposures, new_exposure)
@@ -684,6 +692,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
         """
         self.flat_graph = {
             "exposures": {k: v.to_dict(omit_none=False) for k, v in self.exposures.items()},
+            "groups": {k: v.to_dict(omit_none=False) for k, v in self.groups.items()},
             "metrics": {k: v.to_dict(omit_none=False) for k, v in self.metrics.items()},
             "nodes": {k: v.to_dict(omit_none=False) for k, v in self.nodes.items()},
             "sources": {k: v.to_dict(omit_none=False) for k, v in self.sources.items()},
@@ -775,6 +784,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
             docs={k: _deepcopy(v) for k, v in self.docs.items()},
             exposures={k: _deepcopy(v) for k, v in self.exposures.items()},
             metrics={k: _deepcopy(v) for k, v in self.metrics.items()},
+            groups={k: _deepcopy(v) for k, v in self.groups.items()},
             selectors={k: _deepcopy(v) for k, v in self.selectors.items()},
             metadata=self.metadata,
             disabled={k: _deepcopy(v) for k, v in self.disabled.items()},
@@ -807,8 +817,22 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
         forward_edges = build_macro_edges(edge_members)
         return forward_edges
 
+    def build_group_map(self):
+        groupable_nodes = list(
+            chain(
+                self.nodes.values(),
+                self.metrics.values(),
+            )
+        )
+        group_map = {group.name: [] for group in self.groups.values()}
+        for node in groupable_nodes:
+            if node.group is not None:
+                group_map[node.group].append(node.unique_id)
+        self.group_map = group_map
+
     def writable_manifest(self):
         self.build_parent_and_child_maps()
+        self.build_group_map()
         return WritableManifest(
             nodes=self.nodes,
             sources=self.sources,
@@ -816,11 +840,13 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
             docs=self.docs,
             exposures=self.exposures,
             metrics=self.metrics,
+            groups=self.groups,
             selectors=self.selectors,
             metadata=self.metadata,
             disabled=self.disabled,
             child_map=self.child_map,
             parent_map=self.parent_map,
+            group_map=self.group_map,
         )
 
     def write(self, path):
@@ -897,6 +923,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
         self,
         target_model_name: str,
         target_model_package: Optional[str],
+        target_model_version: Optional[NodeVersion],
         current_project: str,
         node_package: str,
     ) -> MaybeNonSource:
@@ -906,14 +933,14 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
 
         candidates = _search_packages(current_project, node_package, target_model_package)
         for pkg in candidates:
-            node = self.ref_lookup.find(target_model_name, pkg, self)
+            node = self.ref_lookup.find(target_model_name, pkg, target_model_version, self)
 
             if node is not None and node.config.enabled:
                 return node
 
             # it's possible that the node is disabled
             if disabled is None:
-                disabled = self.disabled_lookup.find(target_model_name, pkg)
+                disabled = self.disabled_lookup.find(target_model_name, pkg, target_model_version)
 
         if disabled:
             return Disabled(disabled[0])
@@ -1070,6 +1097,8 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
                 source_file.metrics.append(node.unique_id)
             if isinstance(node, Exposure):
                 source_file.exposures.append(node.unique_id)
+            if isinstance(node, Group):
+                source_file.groups.append(node.unique_id)
         else:
             source_file.nodes.append(node.unique_id)
 
@@ -1082,6 +1111,11 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
         _check_duplicates(metric, self.metrics)
         self.metrics[metric.unique_id] = metric
         source_file.metrics.append(metric.unique_id)
+
+    def add_group(self, source_file: SchemaSourceFile, group: Group):
+        _check_duplicates(group, self.groups)
+        self.groups[group.unique_id] = group
+        source_file.groups.append(group.unique_id)
 
     def add_disabled_nofile(self, node: GraphMemberNode):
         # There can be multiple disabled nodes for the same unique_id
@@ -1125,6 +1159,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
             self.docs,
             self.exposures,
             self.metrics,
+            self.groups,
             self.selectors,
             self.files,
             self.metadata,
@@ -1156,7 +1191,7 @@ AnyManifest = Union[Manifest, MacroManifest]
 
 
 @dataclass
-@schema_version("manifest", 8)
+@schema_version("manifest", 9)
 class WritableManifest(ArtifactMixin):
     nodes: Mapping[UniqueID, ManifestNode] = field(
         metadata=dict(description=("The nodes defined in the dbt project and its dependencies"))
@@ -1178,10 +1213,13 @@ class WritableManifest(ArtifactMixin):
     metrics: Mapping[UniqueID, Metric] = field(
         metadata=dict(description=("The metrics defined in the dbt project and its dependencies"))
     )
+    groups: Mapping[UniqueID, Group] = field(
+        metadata=dict(description=("The groups defined in the dbt project"))
+    )
     selectors: Mapping[UniqueID, Any] = field(
         metadata=dict(description=("The selectors defined in selectors.yml"))
     )
-    disabled: Optional[Mapping[UniqueID, List[ResultNode]]] = field(
+    disabled: Optional[Mapping[UniqueID, List[GraphMemberNode]]] = field(
         metadata=dict(description="A mapping of the disabled nodes in the target")
     )
     parent_map: Optional[NodeEdgeMap] = field(
@@ -1194,6 +1232,11 @@ class WritableManifest(ArtifactMixin):
             description="A mapping from parent nodes to their dependents",
         )
     )
+    group_map: Optional[NodeEdgeMap] = field(
+        metadata=dict(
+            description="A mapping from group names to their nodes",
+        )
+    )
     metadata: ManifestMetadata = field(
         metadata=dict(
             description="Metadata about the manifest",
@@ -1202,13 +1245,34 @@ class WritableManifest(ArtifactMixin):
 
     @classmethod
     def compatible_previous_versions(self):
-        return [("manifest", 4), ("manifest", 5), ("manifest", 6), ("manifest", 7)]
+        return [
+            ("manifest", 4),
+            ("manifest", 5),
+            ("manifest", 6),
+            ("manifest", 7),
+            ("manifest", 8),
+        ]
+
+    @classmethod
+    def upgrade_schema_version(cls, data):
+        """This overrides the "upgrade_schema_version" call in VersionedSchema (via
+        ArtifactMixin) to modify the dictionary passed in from earlier versions of the manifest."""
+        if get_manifest_schema_version(data) <= 8:
+            data = upgrade_manifest_json(data)
+        return cls.from_dict(data)
 
     def __post_serialize__(self, dct):
         for unique_id, node in dct["nodes"].items():
             if "config_call_dict" in node:
                 del node["config_call_dict"]
         return dct
+
+
+def get_manifest_schema_version(dct: dict) -> int:
+    schema_version = dct.get("metadata", {}).get("dbt_schema_version", None)
+    if not schema_version:
+        raise ValueError("Manifest doesn't have schema version")
+    return int(schema_version.split(".")[-2][-1])
 
 
 def _check_duplicates(value: BaseNode, src: Mapping[str, BaseNode]):

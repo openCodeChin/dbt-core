@@ -30,7 +30,7 @@ from dbt.exceptions import (
 from dbt.events.functions import fire_event, get_invocation_id
 from dbt.events.types import (
     DatabaseErrorRunningHook,
-    EmptyLine,
+    Formatting,
     HooksRunning,
     FinishedRunningStats,
     LogModelResult,
@@ -108,6 +108,16 @@ def track_model_run(index, num_nodes, run_model_result):
     if tracking.active_user is None:
         raise DbtInternalError("cannot track model run with no active user")
     invocation_id = get_invocation_id()
+    node = run_model_result.node
+    has_group = True if hasattr(node, "group") and node.group else False
+    if node.resource_type == NodeType.Model:
+        access = node.access.value if node.access is not None else None
+        contract_enforced = node.contract.enforced
+        versioned = True if node.version else False
+    else:
+        access = None
+        contract_enforced = False
+        versioned = False
     tracking.track_model_run(
         {
             "invocation_id": invocation_id,
@@ -117,11 +127,15 @@ def track_model_run(index, num_nodes, run_model_result):
             "run_status": str(run_model_result.status).upper(),
             "run_skipped": run_model_result.status == NodeStatus.Skipped,
             "run_error": run_model_result.status == NodeStatus.Error,
-            "model_materialization": run_model_result.node.get_materialization(),
-            "model_id": utils.get_hash(run_model_result.node),
-            "hashed_contents": utils.get_hashed_contents(run_model_result.node),
+            "model_materialization": node.get_materialization(),
+            "model_id": utils.get_hash(node),
+            "hashed_contents": utils.get_hashed_contents(node),
             "timing": [t.to_dict(omit_none=True) for t in run_model_result.timing],
-            "language": str(run_model_result.node.language),
+            "language": str(node.language),
+            "has_group": has_group,
+            "contract_enforced": contract_enforced,
+            "access": access,
+            "versioned": versioned,
         }
     )
 
@@ -287,8 +301,8 @@ class ModelRunner(CompileRunner):
 
 
 class RunTask(CompileTask):
-    def __init__(self, args, config):
-        super().__init__(args, config)
+    def __init__(self, args, config, manifest):
+        super().__init__(args, config, manifest)
         self.ran_hooks = []
         self._total_executed = 0
 
@@ -335,7 +349,7 @@ class RunTask(CompileTask):
         num_hooks = len(ordered_hooks)
 
         with TextOnly():
-            fire_event(EmptyLine())
+            fire_event(Formatting(""))
         fire_event(HooksRunning(num_hooks=num_hooks, hook_type=hook_type))
 
         startctx = TimestampNamed("node_started_at")
@@ -388,7 +402,7 @@ class RunTask(CompileTask):
         self._total_executed += len(ordered_hooks)
 
         with TextOnly():
-            fire_event(EmptyLine())
+            fire_event(Formatting(""))
 
     def safe_run_hooks(
         self, adapter, hook_type: RunHookType, extra_context: Dict[str, Any]
@@ -419,7 +433,7 @@ class RunTask(CompileTask):
             execution = utils.humanize_execution_time(execution_time=execution_time)
 
         with TextOnly():
-            fire_event(EmptyLine())
+            fire_event(Formatting(""))
         fire_event(
             FinishedRunningStats(
                 stat_line=stat_line, execution=execution, execution_time=execution_time
@@ -443,7 +457,7 @@ class RunTask(CompileTask):
         database_schema_set: Set[Tuple[Optional[str], str]] = {
             (r.node.database, r.node.schema)
             for r in results
-            if r.node.is_relational
+            if (hasattr(r, "node") and r.node.is_relational)
             and r.status not in (NodeStatus.Error, NodeStatus.Fail, NodeStatus.Skipped)
         }
 

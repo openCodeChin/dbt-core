@@ -9,7 +9,7 @@ from typing import Dict, List
 from contextlib import contextmanager
 from dbt.adapters.factory import Adapter
 
-from dbt.main import handle_and_check
+from dbt.cli.main import dbtRunner
 from dbt.logger import log_manager
 from dbt.contracts.graph.manifest import Manifest
 from dbt.events.functions import (
@@ -18,7 +18,9 @@ from dbt.events.functions import (
     stop_capture_stdout_logs,
     reset_metadata_vars,
 )
-from dbt.events.test_types import IntegrationTestDebug
+from dbt.events.base_types import EventLevel
+from dbt.events.types import Note
+
 
 # =============================================================================
 # Test utilities
@@ -29,6 +31,8 @@ from dbt.events.test_types import IntegrationTestDebug
 #   rm_file
 #   write_file
 #   read_file
+#   mkdir
+#   rm_dir
 #   get_artifact
 #   update_config_file
 #   write_config_file
@@ -79,12 +83,28 @@ def run_dbt(args: List[str] = None, expect_pass=True):
         args = ["run"]
 
     print("\n\nInvoking dbt with {}".format(args))
-    res, success = handle_and_check(args)
+    from dbt.flags import get_flags
+
+    flags = get_flags()
+    project_dir = getattr(flags, "PROJECT_DIR", None)
+    profiles_dir = getattr(flags, "PROFILES_DIR", None)
+    if project_dir and "--project-dir" not in args:
+        args.extend(["--project-dir", project_dir])
+    if profiles_dir and "--profiles-dir" not in args:
+        args.extend(["--profiles-dir", profiles_dir])
+
+    dbt = dbtRunner()
+    res = dbt.invoke(args)
+
+    # the exception is immediately raised to be caught in tests
+    # using a pattern like `with pytest.raises(SomeException):`
+    if res.exception is not None:
+        raise res.exception
 
     if expect_pass is not None:
-        assert success == expect_pass, "dbt exit state did not match expected"
+        assert res.success == expect_pass, "dbt exit state did not match expected"
 
-    return res
+    return res.result
 
 
 # Use this if you need to capture the command logs in a test.
@@ -148,6 +168,11 @@ def write_file(contents, *paths):
         fp.write(contents)
 
 
+def file_exists(*paths):
+    """Check if file exists at path"""
+    return os.path.exists(os.path.join(*paths))
+
+
 # Used in test utilities
 def read_file(*paths):
     contents = ""
@@ -156,12 +181,33 @@ def read_file(*paths):
     return contents
 
 
+# To create a directory
+def mkdir(directory_path):
+    try:
+        os.makedirs(directory_path)
+    except FileExistsError:
+        raise FileExistsError(f"{directory_path} already exists.")
+
+
+# To remove a directory
+def rm_dir(directory_path):
+    try:
+        shutil.rmtree(directory_path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"{directory_path} does not exist.")
+
+
 # Get an artifact (usually from the target directory) such as
 # manifest.json or catalog.json to use in a test
 def get_artifact(*paths):
     contents = read_file(*paths)
     dct = json.loads(contents)
     return dct
+
+
+def write_artifact(dct, *paths):
+    json_output = json.dumps(dct)
+    write_file(json_output, *paths)
 
 
 # For updating yaml config files
@@ -236,7 +282,7 @@ def run_sql_with_adapter(adapter, sql, fetch=None):
     sql = sql.format(**kwargs)
 
     msg = f'test connection "__test" executing: {sql}'
-    fire_event(IntegrationTestDebug(msg=msg))
+    fire_event(Note(msg=msg), level=EventLevel.DEBUG)
     with get_connection(adapter) as conn:
         return adapter.run_sql_for_tests(sql, fetch, conn)
 
@@ -282,7 +328,7 @@ def relation_from_name(adapter, name: str):
 
 
 # Ensure that models with different materialiations have the
-# corrent table/view.
+# current table/view.
 # Uses:
 #   adapter.list_relations_without_caching
 def check_relation_types(adapter, relation_to_type):
@@ -352,7 +398,6 @@ def check_relation_has_expected_schema(adapter, relation_name, expected_schema: 
 def check_relations_equal_with_relations(
     adapter: Adapter, relations: List, compare_snapshot_cols=False
 ):
-
     with get_connection(adapter):
         basis, compares = relations[0], relations[1:]
         # Skip columns starting with "dbt_" because we don't want to

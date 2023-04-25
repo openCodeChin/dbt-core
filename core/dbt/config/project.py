@@ -12,10 +12,10 @@ from typing import (
 )
 from typing_extensions import Protocol, runtime_checkable
 
-import hashlib
 import os
 
-from dbt import flags, deprecations
+from dbt.flags import get_flags
+from dbt import deprecations
 from dbt.clients.system import path_exists, resolve_path_from_base, load_file_contents
 from dbt.clients.yaml_helper import load_yaml_text
 from dbt.contracts.connection import QueryComment
@@ -30,16 +30,16 @@ from dbt.graph import SelectionSpec
 from dbt.helper_types import NoValue
 from dbt.semver import VersionSpecifier, versions_compatible
 from dbt.version import get_installed_version
-from dbt.utils import MultiDict
+from dbt.utils import MultiDict, md5
 from dbt.node_types import NodeType
 from dbt.config.selectors import SelectorDict
 from dbt.contracts.project import (
     Project as ProjectContract,
     SemverString,
 )
-from dbt.contracts.project import PackageConfig
+from dbt.contracts.project import PackageConfig, ProjectPackageMetadata
 from dbt.dataclass_schema import ValidationError
-from .renderer import DbtProjectYamlRenderer
+from .renderer import DbtProjectYamlRenderer, PackageRenderer
 from .selectors import (
     selector_config_from_data,
     selector_data_from_root,
@@ -73,6 +73,11 @@ https://docs.getdbt.com/docs/package-management
 
 Validator Error:
 {error}
+"""
+
+MISSING_DBT_PROJECT_ERROR = """\
+No dbt_project.yml found at expected path {path}
+Verify that each entry within packages.yml (and their transitive dependencies) contains a file named dbt_project.yml
 """
 
 
@@ -132,11 +137,10 @@ def _all_source_paths(
     analysis_paths: List[str],
     macro_paths: List[str],
 ) -> List[str]:
-    # We need to turn a list of lists into just a list, then convert to a set to
-    # get only unique elements, then back to a list
-    return list(
-        set(list(chain(model_paths, seed_paths, snapshot_paths, analysis_paths, macro_paths)))
-    )
+    paths = chain(model_paths, seed_paths, snapshot_paths, analysis_paths, macro_paths)
+    # Strip trailing slashes since the path is the same even though the name is not
+    stripped_paths = map(lambda s: s.rstrip("/"), paths)
+    return list(set(stripped_paths))
 
 
 T = TypeVar("T")
@@ -156,16 +160,14 @@ def value_or(value: Optional[T], default: T) -> T:
         return value
 
 
-def _raw_project_from(project_root: str) -> Dict[str, Any]:
+def load_raw_project(project_root: str) -> Dict[str, Any]:
 
     project_root = os.path.normpath(project_root)
     project_yaml_filepath = os.path.join(project_root, "dbt_project.yml")
 
     # get the project.yml contents
     if not path_exists(project_yaml_filepath):
-        raise DbtProjectError(
-            "no dbt_project.yml found at expected path {}".format(project_yaml_filepath)
-        )
+        raise DbtProjectError(MISSING_DBT_PROJECT_ERROR.format(path=project_yaml_filepath))
 
     project_dict = _load_yaml(project_yaml_filepath)
 
@@ -289,23 +291,34 @@ class PartialProject(RenderComponents):
                 exc.path = os.path.join(self.project_root, "dbt_project.yml")
             raise
 
-    def check_config_path(self, project_dict, deprecated_path, exp_path):
+    def render_package_metadata(self, renderer: PackageRenderer) -> ProjectPackageMetadata:
+        packages_data = renderer.render_data(self.packages_dict)
+        packages_config = package_config_from_data(packages_data)
+        if not self.project_name:
+            raise DbtProjectError("Package dbt_project.yml must have a name!")
+        return ProjectPackageMetadata(self.project_name, packages_config.packages)
+
+    def check_config_path(
+        self, project_dict, deprecated_path, expected_path=None, default_value=None
+    ):
         if deprecated_path in project_dict:
-            if exp_path in project_dict:
+            if expected_path in project_dict:
                 msg = (
-                    "{deprecated_path} and {exp_path} cannot both be defined. The "
-                    "`{deprecated_path}` config has been deprecated in favor of `{exp_path}`. "
+                    "{deprecated_path} and {expected_path} cannot both be defined. The "
+                    "`{deprecated_path}` config has been deprecated in favor of `{expected_path}`. "
                     "Please update your `dbt_project.yml` configuration to reflect this "
                     "change."
                 )
                 raise DbtProjectError(
-                    msg.format(deprecated_path=deprecated_path, exp_path=exp_path)
+                    msg.format(deprecated_path=deprecated_path, expected_path=expected_path)
                 )
-            deprecations.warn(
-                f"project-config-{deprecated_path}",
-                deprecated_path=deprecated_path,
-                exp_path=exp_path,
-            )
+            # this field is no longer supported, but many projects may specify it with the default value
+            # if so, let's only raise this deprecation warning if they set a custom value
+            if not default_value or project_dict[deprecated_path] != default_value:
+                deprecations.warn(
+                    f"project-config-{deprecated_path}",
+                    deprecated_path=deprecated_path,
+                )
 
     def create_project(self, rendered: RenderComponents) -> "Project":
         unrendered = RenderComponents(
@@ -320,6 +333,8 @@ class PartialProject(RenderComponents):
 
         self.check_config_path(rendered.project_dict, "source-paths", "model-paths")
         self.check_config_path(rendered.project_dict, "data-paths", "seed-paths")
+        self.check_config_path(rendered.project_dict, "log-path", default_value="logs")
+        self.check_config_path(rendered.project_dict, "target-path", default_value="target")
 
         try:
             ProjectContract.validate(rendered.project_dict)
@@ -363,9 +378,13 @@ class PartialProject(RenderComponents):
 
         docs_paths: List[str] = value_or(cfg.docs_paths, all_source_paths)
         asset_paths: List[str] = value_or(cfg.asset_paths, [])
-        target_path: str = flag_or(flags.TARGET_PATH, cfg.target_path, "target")
+        flags = get_flags()
+
+        flag_target_path = str(flags.TARGET_PATH) if flags.TARGET_PATH else None
+        target_path: str = flag_or(flag_target_path, cfg.target_path, "target")
+        log_path: str = str(flags.LOG_PATH)
+
         clean_targets: List[str] = value_or(cfg.clean_targets, [target_path])
-        log_path: str = flag_or(flags.LOG_PATH, cfg.log_path, "logs")
         packages_install_path: str = value_or(cfg.packages_install_path, "dbt_packages")
         # in the default case we'll populate this once we know the adapter type
         # It would be nice to just pass along a Quoting here, but that would
@@ -485,14 +504,7 @@ class PartialProject(RenderComponents):
         cls, project_root: str, *, verify_version: bool = False
     ) -> "PartialProject":
         project_root = os.path.normpath(project_root)
-        project_dict = _raw_project_from(project_root)
-        config_version = project_dict.get("config-version", 1)
-        if config_version != 2:
-            raise DbtProjectError(
-                f"Invalid config version: {config_version}, expected 2",
-                path=os.path.join(project_root, "dbt_project.yml"),
-            )
-
+        project_dict = load_raw_project(project_root)
         packages_dict = package_data_from_root(project_root)
         selectors_dict = selector_data_from_root(project_root)
         return cls.from_dicts(
@@ -525,7 +537,7 @@ class VarProvider:
 @dataclass
 class Project:
     project_name: str
-    version: Union[SemverString, float]
+    version: Optional[Union[SemverString, float]]
     project_root: str
     profile_name: Optional[str]
     model_paths: List[str]
@@ -659,11 +671,11 @@ class Project:
         *,
         verify_version: bool = False,
     ) -> "Project":
-        partial = cls.partial_load(project_root, verify_version=verify_version)
+        partial = PartialProject.from_project_root(project_root, verify_version=verify_version)
         return partial.render(renderer)
 
     def hashed_name(self):
-        return hashlib.md5(self.project_name.encode("utf-8")).hexdigest()
+        return md5(self.project_name)
 
     def get_selector(self, name: str) -> Union[SelectionSpec, bool]:
         if name not in self.selectors:

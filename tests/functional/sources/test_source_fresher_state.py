@@ -90,7 +90,6 @@ class SuccessfulSourceFreshnessTest(BaseSourcesTest):
             == "https://schemas.getdbt.com/dbt/sources/v3.json"
         )
         assert data["metadata"]["dbt_version"] == dbt.version.__version__
-        assert data["metadata"]["invocation_id"] == dbt.tracking.active_user.invocation_id
         key = "key"
         if os.name == "nt":
             key = key.upper()
@@ -112,7 +111,7 @@ class SuccessfulSourceFreshnessTest(BaseSourcesTest):
                     "warn_after": {"count": 10, "period": "hour"},
                     "error_after": {"count": 18, "period": "hour"},
                 },
-                "adapter_response": {},
+                "adapter_response": {"_message": "SELECT 1", "code": "SELECT", "rows_affected": 1},
                 "thread_id": AnyStringWith("Thread-"),
                 "execution_time": AnyFloat(),
                 "timing": [
