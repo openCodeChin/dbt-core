@@ -220,7 +220,7 @@ jobs:
           name: integration_results_${{ matrix.python-version }}_${{ matrix.os }}
           path: integration_results_${{ matrix.split-group }}.csv
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v3
         if: always()
         with:
           name: integration_coverage_${{ matrix.python-version }}_${{ matrix.os }}
