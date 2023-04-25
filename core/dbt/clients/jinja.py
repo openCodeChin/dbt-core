@@ -574,14 +574,14 @@ def get_rendered(
     node=None,
     capture_macros: bool = False,
     native: bool = False,
-) -> str:
+) -> Any:
     # performance optimization: if there are no jinja control characters in the
     # string, we can just return the input. Fall back to jinja if the type is
     # not a string or if native rendering is enabled (so '1' -> 1, etc...)
     # If this is desirable in the native env as well, we could handle the
     # native=True case by passing the input string to ast.literal_eval, like
     # the native renderer does.
-    has_render_chars = _HAS_RENDER_CHARS_PAT.search(string)
+    has_render_chars = not isinstance(string, str) or _HAS_RENDER_CHARS_PAT.search(string)
 
     if not has_render_chars:
         if not native:
