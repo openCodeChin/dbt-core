@@ -14,7 +14,7 @@ RUN apt-get update \
     && apt-get dist-upgrade -y \
     && apt-get install -y --no-install-recommends \
     netcat \
-    postgresql \
+    postgresql-15 \
     curl \
     git \
     ssh \
