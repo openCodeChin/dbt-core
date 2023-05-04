@@ -1307,18 +1307,19 @@ class BaseAdapter(metaclass=AdapterMeta):
     def render_column_constraint(cls, constraint: ColumnLevelConstraint) -> Optional[str]:
         """Render the given constraint as DDL text. Should be overriden by adapters which need custom constraint
         rendering."""
-        if constraint.type == ConstraintType.check and constraint.expression:
-            return f"check ({constraint.expression})"
+        constraint_expression = constraint.expression or ""
+        if constraint.type == ConstraintType.check and constraint_expression:
+            return f"check ({constraint_expression})"
         elif constraint.type == ConstraintType.not_null:
-            return "not null"
+            return f"not null {constraint_expression}".strip()
         elif constraint.type == ConstraintType.unique:
-            return "unique"
+            return f"unique {constraint_expression}".strip()
         elif constraint.type == ConstraintType.primary_key:
-            return "primary key"
-        elif constraint.type == ConstraintType.foreign_key and constraint.expression:
-            return f"references {constraint.expression}"
-        elif constraint.type == ConstraintType.custom and constraint.expression:
-            return constraint.expression
+            return f"primary key {constraint_expression}".strip()
+        elif constraint.type == ConstraintType.foreign_key and constraint_expression:
+            return f"references {constraint_expression}"
+        elif constraint.type == ConstraintType.custom and constraint_expression:
+            return constraint_expression
         else:
             return None
 
@@ -1385,17 +1386,20 @@ class BaseAdapter(metaclass=AdapterMeta):
         """Render the given constraint as DDL text. Should be overriden by adapters which need custom constraint
         rendering."""
         constraint_prefix = f"constraint {constraint.name} " if constraint.name else ""
+        constraint_expression = constraint.expression or ""
         column_list = ", ".join(constraint.columns)
-        if constraint.type == ConstraintType.check and constraint.expression:
-            return f"{constraint_prefix}check ({constraint.expression})"
+        if constraint.type == ConstraintType.check and constraint_expression:
+            return f"{constraint_prefix}check ({constraint_expression})"
         elif constraint.type == ConstraintType.unique:
-            return f"{constraint_prefix}unique ({column_list})"
+            constraint_expression = f" {constraint_expression}"
+            return f"{constraint_prefix}unique{constraint_expression} ({column_list})"
         elif constraint.type == ConstraintType.primary_key:
-            return f"{constraint_prefix}primary key ({column_list})"
-        elif constraint.type == ConstraintType.foreign_key and constraint.expression:
-            return f"{constraint_prefix}foreign key ({column_list}) references {constraint.expression}"
-        elif constraint.type == ConstraintType.custom and constraint.expression:
-            return f"{constraint_prefix}{constraint.expression}"
+            constraint_expression = f" {constraint_expression}"
+            return f"{constraint_prefix}primary key{constraint_expression} ({column_list})"
+        elif constraint.type == ConstraintType.foreign_key and constraint_expression:
+            return f"{constraint_prefix}foreign key ({column_list}) references {constraint_expression}"
+        elif constraint.type == ConstraintType.custom and constraint_expression:
+            return f"{constraint_prefix}{constraint_expression}"
         else:
             return None
 

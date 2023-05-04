@@ -327,6 +327,8 @@ models:
             expression: id >= 1
           - type: foreign_key
             expression: {schema}.foreign_key_model (id)
+          - type: unique
+            expression: nulls not distinct
         tests:
           - unique
       - name: color
@@ -421,6 +423,9 @@ models:
       - type: foreign_key
         columns: [ id ]
         expression: {schema}.foreign_key_model (id)
+      - type: unique
+        columns: [ id ]
+        expression: nulls not distinct
     columns:
       - name: id
         quote: true
