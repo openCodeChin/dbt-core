@@ -179,7 +179,7 @@ class BaseConstraintsRuntimeDdlEnforcement:
     def expected_sql(self):
         return """
 create table <model_identifier> (
-    id integer not null primary key check (id > 0),
+    id integer not null primary key check ((id > 0)) check (id >= 1),
     color text,
     date_day text
 ) ;
@@ -379,7 +379,8 @@ create table <model_identifier> (
     id integer not null,
     color text,
     date_day text,
-    check (id > 0),
+    check ((id > 0)),
+    check (id >= 1),
     primary key (id),
     constraint strange_uniqueness_requirement unique (color, date_day)
 ) ;

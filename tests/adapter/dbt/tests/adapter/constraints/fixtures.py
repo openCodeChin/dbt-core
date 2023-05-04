@@ -196,6 +196,8 @@ models:
           - type: primary_key
           - type: check
             expression: (id > 0)
+          - type: check
+            expression: id >= 1
         tests:
           - unique
       - name: color
@@ -271,6 +273,8 @@ models:
     constraints:
       - type: check
         expression: (id > 0)
+      - type: check
+        expression: id >= 1
       - type: primary_key
         columns: [ id ]
       - type: unique

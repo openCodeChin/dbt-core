@@ -1308,7 +1308,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         """Render the given constraint as DDL text. Should be overriden by adapters which need custom constraint
         rendering."""
         if constraint.type == ConstraintType.check and constraint.expression:
-            return f"check {constraint.expression}"
+            return f"check ({constraint.expression})"
         elif constraint.type == ConstraintType.not_null:
             return "not null"
         elif constraint.type == ConstraintType.unique:
@@ -1387,7 +1387,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         constraint_prefix = f"constraint {constraint.name} " if constraint.name else ""
         column_list = ", ".join(constraint.columns)
         if constraint.type == ConstraintType.check and constraint.expression:
-            return f"{constraint_prefix}check {constraint.expression}"
+            return f"{constraint_prefix}check ({constraint.expression})"
         elif constraint.type == ConstraintType.unique:
             return f"{constraint_prefix}unique ({column_list})"
         elif constraint.type == ConstraintType.primary_key:
