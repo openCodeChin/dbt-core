@@ -1315,8 +1315,8 @@ class BaseAdapter(metaclass=AdapterMeta):
             return "unique"
         elif constraint.type == ConstraintType.primary_key:
             return "primary key"
-        elif constraint.type == ConstraintType.foreign_key:
-            return "foreign key"
+        elif constraint.type == ConstraintType.foreign_key and constraint.expression:
+            return f"references {constraint.expression}"
         elif constraint.type == ConstraintType.custom and constraint.expression:
             return constraint.expression
         else:
@@ -1392,8 +1392,8 @@ class BaseAdapter(metaclass=AdapterMeta):
             return f"{constraint_prefix}unique ({column_list})"
         elif constraint.type == ConstraintType.primary_key:
             return f"{constraint_prefix}primary key ({column_list})"
-        elif constraint.type == ConstraintType.foreign_key:
-            return f"{constraint_prefix}foreign key ({column_list})"
+        elif constraint.type == ConstraintType.foreign_key and constraint.expression:
+            return f"{constraint_prefix}foreign key ({column_list}) references {constraint.expression}"
         elif constraint.type == ConstraintType.custom and constraint.expression:
             return f"{constraint_prefix}{constraint.expression}"
         else:
