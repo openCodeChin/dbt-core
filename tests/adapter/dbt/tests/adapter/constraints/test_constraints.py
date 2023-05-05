@@ -404,8 +404,7 @@ create table <model_identifier> (
     check (id >= 1),
     primary key (id),
     constraint strange_uniqueness_requirement unique (color, date_day),
-    foreign key (id) references <foreign_key_model_identifier> (id),
-    unique (id)
+    foreign key (id) references <foreign_key_model_identifier> (id)
 ) ;
 insert into <model_identifier> (
     id ,

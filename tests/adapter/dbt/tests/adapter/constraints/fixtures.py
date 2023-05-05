@@ -422,8 +422,6 @@ models:
       - type: foreign_key
         columns: [ id ]
         expression: {schema}.foreign_key_model (id)
-      - type: unique
-        columns: [ id ]
     columns:
       - name: id
         quote: true
