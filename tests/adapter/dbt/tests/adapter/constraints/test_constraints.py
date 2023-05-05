@@ -190,7 +190,7 @@ class BaseConstraintsRuntimeDdlEnforcement:
     def expected_sql(self):
         return """
 create table <model_identifier> (
-    id integer not null primary key check ((id > 0)) check (id >= 1) references <foreign_key_model_identifier> (id) unique nulls not distinct,
+    id integer not null primary key check ((id > 0)) check (id >= 1) references <foreign_key_model_identifier> (id) unique,
     color text,
     date_day text
 ) ;
@@ -405,7 +405,7 @@ create table <model_identifier> (
     primary key (id),
     constraint strange_uniqueness_requirement unique (color, date_day),
     foreign key (id) references <foreign_key_model_identifier> (id),
-    unique nulls not distinct (id)
+    unique (id)
 ) ;
 insert into <model_identifier> (
     id ,
