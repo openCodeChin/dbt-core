@@ -23,8 +23,10 @@ from dbt.tests.adapter.constraints.fixtures import (
     my_model_incremental_wrong_name_sql,
     my_model_with_nulls_sql,
     my_model_incremental_with_nulls_sql,
+    my_model_with_quoted_column_name_sql,
     model_schema_yml,
     constrained_model_schema_yml,
+    model_quoted_column_schema_yml,
 )
 
 
@@ -158,7 +160,8 @@ class BaseConstraintsColumnsEqual:
 
 
 def _normalize_whitespace(input: str) -> str:
-    return re.sub(r"\s+", " ", input).lower().strip()
+    subbed = re.sub(r"\s+", " ", input)
+    return re.sub(r"\s?([\(\),])\s?", r"\1", subbed).lower().strip()
 
 
 class BaseConstraintsRuntimeDdlEnforcement:
@@ -211,15 +214,11 @@ insert into <model_identifier> (
         # the name is not what we're testing here anyways and varies based on materialization
         # TODO: consider refactoring this to introspect logs instead
         generated_sql = read_file("target", "run", "test", "models", "my_model.sql")
-        generated_sql_modified = _normalize_whitespace(generated_sql)
-        generated_sql_list = generated_sql_modified.split(" ")
+        generated_sql_list = generated_sql.split(" ")
         for idx in [n for n, x in enumerate(generated_sql_list) if "my_model" in x]:
             generated_sql_list[idx] = "<model_identifier>"
         generated_sql_generic = " ".join(generated_sql_list)
-
-        expected_sql_check = _normalize_whitespace(expected_sql)
-
-        assert expected_sql_check == generated_sql_generic
+        assert _normalize_whitespace(expected_sql) == _normalize_whitespace(generated_sql_generic)
 
 
 class BaseConstraintsRollback:
@@ -407,13 +406,44 @@ insert into <model_identifier> (
         results = run_dbt(["run", "-s", "my_model"])
         assert len(results) == 1
         generated_sql = read_file("target", "run", "test", "models", "my_model.sql")
-        generated_sql_list = _normalize_whitespace(generated_sql).split(" ")
-        generated_sql_list = [
-            "<model_identifier>" if "my_model" in s else s for s in generated_sql_list
-        ]
+        generated_sql_list = generated_sql.split(" ")
+        for idx in [n for n, x in enumerate(generated_sql_list) if "my_model" in x]:
+            generated_sql_list[idx] = "<model_identifier>"
         generated_sql_generic = " ".join(generated_sql_list)
-        assert _normalize_whitespace(expected_sql) == generated_sql_generic
+        assert _normalize_whitespace(expected_sql) == _normalize_whitespace(generated_sql_generic)
 
 
 class TestModelConstraintsRuntimeEnforcement(BaseModelConstraintsRuntimeEnforcement):
     pass
+
+
+class TestConstraintQuotedColumn(BaseConstraintsRuntimeDdlEnforcement):
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "my_model.sql": my_model_with_quoted_column_name_sql,
+            "constraints_schema.yml": model_quoted_column_schema_yml,
+        }
+
+    @pytest.fixture(scope="class")
+    def expected_sql(self):
+        return """
+create table <model_identifier> (
+    id integer not null,
+    "from" text not null,
+    date_day text,
+    check ("from" = 'blue')
+) ;
+insert into <model_identifier> (
+    id, "from", date_day
+)
+(
+    select id, "from", date_day
+    from (
+        select
+          'blue' as "from",
+          1 as id,
+          '2019-01-01' as date_day
+    ) as model_subq
+);
+"""
