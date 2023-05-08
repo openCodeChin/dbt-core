@@ -1,7 +1,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import field
-from datetime import datetime
+import datetime
 import os
 import traceback
 from typing import (
@@ -22,6 +22,7 @@ import time
 from dbt.events.base_types import EventLevel
 import json
 import pprint
+import msgpack
 
 import dbt.exceptions
 import dbt.tracking
@@ -123,6 +124,36 @@ from dbt.dataclass_schema import StrEnum, dbtClassMixin
 
 PARSING_STATE = DbtProcessState("parsing")
 PERF_INFO_FILE_NAME = "perf_info.json"
+
+
+def extended_mashumaro_encoder(data):
+    return msgpack.packb(data, default=extended_msgpack_encoder, use_bin_type=True)
+
+
+def extended_msgpack_encoder(obj):
+    if type(obj) is datetime.date:
+        date_bytes = msgpack.ExtType(1, obj.isoformat().encode())
+        return date_bytes
+    elif type(obj) is datetime.datetime:
+        datetime_bytes = msgpack.ExtType(2, obj.isoformat().encode())
+        return datetime_bytes
+
+    return obj
+
+
+def extended_mashumuro_decoder(data):
+    return msgpack.unpackb(data, ext_hook=extended_msgpack_decoder, raw=False)
+
+
+def extended_msgpack_decoder(code, data):
+    if code == 1:
+        d = datetime.date.fromisoformat(data.decode())
+        return d
+    elif code == 2:
+        dt = datetime.datetiem.fromisoformat(data.decode())
+        return dt
+    else:
+        return msgpack.ExtType(code, data)
 
 
 class ReparseReason(StrEnum):
@@ -644,7 +675,7 @@ class ManifestLoader:
                     UnableToPartialParse(reason="saved manifest contained the wrong version")
                 )
                 self.manifest.metadata.dbt_version = __version__
-            manifest_msgpack = self.manifest.to_msgpack()
+            manifest_msgpack = self.manifest.to_msgpack(extended_mashumaro_encoder)
             make_directory(os.path.dirname(path))
             with open(path, "wb") as fp:
                 fp.write(manifest_msgpack)
@@ -867,14 +898,14 @@ class ManifestLoader:
             try:
                 with open(path, "rb") as fp:
                     manifest_mp = fp.read()
-                manifest: Manifest = Manifest.from_msgpack(manifest_mp)  # type: ignore
+                manifest: Manifest = Manifest.from_msgpack(manifest_mp, decoder=extended_mashumuro_decoder)  # type: ignore
                 # keep this check inside the try/except in case something about
                 # the file has changed in weird ways, perhaps due to being a
                 # different version of dbt
                 is_partial_parsable, reparse_reason = self.is_partial_parsable(manifest)
                 if is_partial_parsable:
                     # We don't want to have stale generated_at dates
-                    manifest.metadata.generated_at = datetime.utcnow()
+                    manifest.metadata.generated_at = datetime.datetime.utcnow()
                     # or invocation_ids
                     manifest.metadata.invocation_id = get_invocation_id()
                     return manifest

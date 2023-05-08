@@ -1,4 +1,5 @@
 import os
+from datetime import date, datetime, timezone
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -685,6 +686,14 @@ class ModelNode(CompiledNode):
     constraints: List[ModelLevelConstraint] = field(default_factory=list)
     version: Optional[NodeVersion] = None
     latest_version: Optional[NodeVersion] = None
+    deprecation_date: Optional[datetime] = None
+
+    def __post_init__(self):
+        dd = self.deprecation_date
+        if type(dd) is date:
+            self.deprecation_date = datetime.datetime(
+                dd.year, dd.month, dd.day, tzinfo=timezone.utc
+            )
 
     @property
     def is_latest_version(self) -> bool:

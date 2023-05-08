@@ -1,3 +1,4 @@
+import datetime
 import re
 
 from dbt import deprecations
@@ -210,6 +211,7 @@ class UnparsedModelUpdate(UnparsedNodeUpdate):
     access: Optional[str] = None
     latest_version: Optional[NodeVersion] = None
     versions: Sequence[UnparsedVersion] = field(default_factory=list)
+    deprecation_date: Optional[datetime.datetime] = None
 
     def __post_init__(self):
         if self.latest_version:
@@ -228,6 +230,12 @@ class UnparsedModelUpdate(UnparsedNodeUpdate):
             seen_versions.add(str(version.v))
 
         self._version_map = {version.v: version for version in self.versions}
+
+        dd = self.deprecation_date
+        if type(dd) is datetime.date:
+            self.deprecation_date = datetime.datetime(
+                dd.year, dd.month, dd.day, tzinfo=datetime.timezone.utc
+            )
 
     def get_columns_for_version(self, version: NodeVersion) -> List[UnparsedColumn]:
         if version not in self._version_map:

@@ -1977,6 +1977,13 @@
               "type": "null"
             }
           ]
+        },
+        "deprecation_date": {
+          "oneOf": [
+            {
+              "type": "string"
+            }
+          ]
         }
       },
       "additionalProperties": false,

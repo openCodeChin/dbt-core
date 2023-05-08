@@ -1146,6 +1146,30 @@ class UnpinnedRefNewVersionAvailable(InfoLevel):
         return msg
 
 
+class DeprecatedModel(WarnLevel):
+    def code(self):
+        return "I065"
+
+    def message(self) -> str:
+        pass
+
+
+class UpcomingReferenceDeprecation(WarnLevel):
+    def code(self):
+        return "I066"
+
+    def message(self) -> str:
+        pass
+
+
+class DeprecatedReference(WarnLevel):
+    def code(self):
+        return "I067"
+
+    def message(self) -> str:
+        pass
+
+
 # =======================================================
 # M - Deps generation
 # =======================================================
