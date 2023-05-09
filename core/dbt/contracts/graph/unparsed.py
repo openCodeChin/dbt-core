@@ -155,6 +155,7 @@ class UnparsedVersion(dbtClassMixin):
     columns: Sequence[Union[dbt.helper_types.IncludeExclude, UnparsedColumn]] = field(
         default_factory=list
     )
+    deprecation_date: Optional[datetime.datetime] = None
 
     def __lt__(self, other):
         try:
