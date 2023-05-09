@@ -1,0 +1,6 @@
+kind: "Dependencies"
+body: "Update urllib3 requirement from ~=1.0 to >=1,<3 in /core"
+time: 2023-05-09T22:37:21.00000Z
+custom:
+  Author: dependabot[bot]
+  PR: 7582
