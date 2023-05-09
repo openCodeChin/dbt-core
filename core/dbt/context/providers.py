@@ -55,6 +55,7 @@ from dbt.exceptions import (
     LoadAgateTableNotSeedError,
     LoadAgateTableValueError,
     MacroDispatchArgError,
+    MacroResultAlreadyLoadedError,
     MacrosSourcesUnWriteableError,
     MetricArgsError,
     MissingConfigError,
@@ -466,6 +467,7 @@ class ParseRefResolver(BaseRefResolver):
     ) -> RelationProxy:
         self.model.refs.append(self._repack_args(name, package, version))
 
+        # This is not the ref for the "name" passed in, but for the current model.
         return self.Relation.create_from(self.config, self.model)
 
 
@@ -480,6 +482,7 @@ class RuntimeRefResolver(BaseRefResolver):
         target_version: Optional[NodeVersion] = None,
     ) -> RelationProxy:
         target_model = self.manifest.resolve_ref(
+            self.model,
             target_name,
             target_package,
             target_version,
@@ -511,7 +514,11 @@ class RuntimeRefResolver(BaseRefResolver):
         return self.create_relation(target_model)
 
     def create_relation(self, target_model: ManifestNode) -> RelationProxy:
-        if target_model.is_ephemeral_model:
+        if target_model.is_public_node:
+            # Get quoting from publication artifact
+            pub_metadata = self.manifest.publications[target_model.package_name].metadata
+            return self.Relation.create_from_node(pub_metadata, target_model)
+        elif target_model.is_ephemeral_model:
             self.model.set_cte(target_model.unique_id, None)
             return self.Relation.create_ephemeral_from_node(self.config, target_model)
         else:
@@ -524,7 +531,10 @@ class RuntimeRefResolver(BaseRefResolver):
         target_package: Optional[str],
         target_version: Optional[NodeVersion],
     ) -> None:
-        if resolved.unique_id not in self.model.depends_on.nodes:
+        if (
+            resolved.unique_id not in self.model.depends_on.nodes
+            and resolved.unique_id not in self.model.depends_on.public_nodes
+        ):
             args = self._repack_args(target_name, target_package, target_version)
             raise RefBadContextError(node=self.model, args=args)
 
@@ -717,7 +727,7 @@ class ProviderContext(ManifestContext):
         self.config: RuntimeConfig
         self.model: Union[Macro, ManifestNode] = model
         super().__init__(config, manifest, model.package_name)
-        self.sql_results: Dict[str, AttrDict] = {}
+        self.sql_results: Dict[str, Optional[AttrDict]] = {}
         self.context_config: Optional[ContextConfig] = context_config
         self.provider: Provider = provider
         self.adapter = get_adapter(self.config)
@@ -745,12 +755,29 @@ class ProviderContext(ManifestContext):
         return args_to_dict(self.config.args)
 
     @contextproperty
-    def _sql_results(self) -> Dict[str, AttrDict]:
+    def _sql_results(self) -> Dict[str, Optional[AttrDict]]:
         return self.sql_results
 
     @contextmember
     def load_result(self, name: str) -> Optional[AttrDict]:
-        return self.sql_results.get(name)
+        if name in self.sql_results:
+            # handle the special case of "main" macro
+            # See: https://github.com/dbt-labs/dbt-core/blob/ada8860e48b32ac712d92e8b0977b2c3c9749981/core/dbt/task/run.py#L228
+            if name == "main":
+                return self.sql_results["main"]
+
+            # handle a None, which indicates this name was populated but has since been loaded
+            elif self.sql_results[name] is None:
+                raise MacroResultAlreadyLoadedError(name)
+
+            # Handle the regular use case
+            else:
+                ret_val = self.sql_results[name]
+                self.sql_results[name] = None
+                return ret_val
+        else:
+            # Handle trying to load a result that was never stored
+            return None
 
     @contextmember
     def store_result(
