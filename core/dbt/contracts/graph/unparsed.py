@@ -231,12 +231,6 @@ class UnparsedModelUpdate(UnparsedNodeUpdate):
 
         self._version_map = {version.v: version for version in self.versions}
 
-        dd = self.deprecation_date
-        if type(dd) is datetime.date:
-            self.deprecation_date = datetime.datetime(
-                dd.year, dd.month, dd.day, tzinfo=datetime.timezone.utc
-            )
-
     def get_columns_for_version(self, version: NodeVersion) -> List[UnparsedColumn]:
         if version not in self._version_map:
             raise DbtInternalError(
