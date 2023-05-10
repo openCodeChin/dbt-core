@@ -89,7 +89,7 @@ class RelationUpdate:
             package_macro = manifest.find_generate_macro_by_name(
                 component=component,
                 root_project_name=config.project_name,
-                package=package_name,
+                imported_package=package_name,
             )
             if package_macro:
                 imported_macro_context = generate_generate_name_macro_context(

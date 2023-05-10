@@ -569,22 +569,26 @@ class MacroMethods:
         return candidates.last()
 
     def find_generate_macro_by_name(
-        self, component: str, root_project_name: str, package: Optional[str] = None
+        self, component: str, root_project_name: str, imported_package: Optional[str] = None
     ) -> Optional[Macro]:
         """
-        The default `generate_X_name` macros are similar to regular ones, and ignore
-        imported packages.
+        The default `generate_X_name` macros are similar to regular ones, but only
+        includes imported packages when searching for a package.
+        - if package is not provided:
             - if there is a `generate_{component}_name` macro in the root
               project, return it
             - return the `generate_{component}_name` macro from the 'dbt'
               internal project
+        - if package is provided
+            - return the `generate_{component}_name` macro from the imported
+              package, if one exists
         """
 
         def filter(candidate: MacroCandidate) -> bool:
-            if package:
+            if imported_package:
                 return (
                     candidate.locality == Locality.Imported
-                    and package == candidate.macro.package_name
+                    and imported_package == candidate.macro.package_name
                 )
             else:
                 return candidate.locality != Locality.Imported
