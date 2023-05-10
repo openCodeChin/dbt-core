@@ -479,6 +479,7 @@ class ParsedNode(NodeInfoMixin, ParsedNodeMandatory, SerializableType):
                 )
         self.version = patch.version
         self.latest_version = patch.latest_version
+        self.deprecation_date = patch.deprecation_date
 
         # This might not be the ideal place to validate the "access" field,
         # but at this point we have the information we need to properly
@@ -1393,6 +1394,7 @@ class ParsedNodePatch(ParsedPatch):
     access: Optional[str]
     version: Optional[NodeVersion]
     latest_version: Optional[NodeVersion]
+    deprecation_date: Optional[datetime]
 
 
 @dataclass

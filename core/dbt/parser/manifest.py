@@ -52,6 +52,9 @@ from dbt.events.types import (
     StateCheckVarsHash,
     Note,
     PublicationArtifactChanged,
+    DeprecatedModel,
+    DeprecatedReference,
+    UpcomingReferenceDeprecation,
 )
 from dbt.logger import DbtProcessState
 from dbt.node_types import NodeType, AccessType
@@ -94,6 +97,7 @@ from dbt.contracts.graph.nodes import (
     SeedNode,
     ManifestNode,
     ResultNode,
+    ModelNode,
 )
 from dbt.contracts.graph.unparsed import NodeVersion
 from dbt.contracts.util import Writable
@@ -150,7 +154,7 @@ def extended_msgpack_decoder(code, data):
         d = datetime.date.fromisoformat(data.decode())
         return d
     elif code == 2:
-        dt = datetime.datetiem.fromisoformat(data.decode())
+        dt = datetime.datetime.fromisoformat(data.decode())
         return dt
     else:
         return msgpack.ExtType(code, data)
@@ -528,7 +532,42 @@ class ManifestLoader:
             # write out the fully parsed manifest
             self.write_manifest_for_partial_parse()
 
+        self.check_for_model_deprecations()
+
         return self.manifest
+
+    def check_for_model_deprecations(self):
+        for node in self.manifest.nodes.values():
+            if isinstance(node, ModelNode):
+                if node.deprecation_date and node.deprecation_date < datetime.datetime.now():
+                    fire_event(
+                        DeprecatedModel(
+                            model_name=node.name,
+                            model_version=node.version,
+                            deprecation_date=node.deprecation_date.isoformat(),
+                        )
+                    )
+
+                resolved_refs = self.manifest.resolve_refs(node, self.root_project.project_name)
+                resolved_model_refs = [r for r in resolved_refs if isinstance(r, ModelNode)]
+                for resolved_ref in resolved_model_refs:
+                    if resolved_ref.deprecation_date:
+
+                        if resolved_ref.deprecation_date < datetime.datetime.now():
+                            event_cls = DeprecatedReference
+                        else:
+                            event_cls = UpcomingReferenceDeprecation
+
+                        fire_event(
+                            event_cls(
+                                model_name=node.name,
+                                ref_model_package=resolved_ref.package_name,
+                                ref_model_name=resolved_ref.name,
+                                ref_model_version=resolved_ref.version,
+                                ref_model_latest_version=resolved_ref.latest_version,
+                                ref_model_deprecation_date=resolved_ref.deprecation_date.isoformat(),
+                            )
+                        )
 
     def load_and_parse_macros(self, project_parser_files):
         for project in self.all_projects.values():
@@ -1732,6 +1771,7 @@ def write_publication_artifact(root_project: RuntimeConfig, manifest: Manifest):
             latest_version=model.latest_version,
             public_node_dependencies=list(public_node_dependencies),
             generated_at=metadata.generated_at,
+            deprecation_date=model.deprecation_date,
         )
         public_models[unique_id] = public_model
 

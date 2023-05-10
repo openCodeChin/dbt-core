@@ -1,3 +1,4 @@
+import datetime
 import itertools
 import os
 import pathlib
@@ -901,6 +902,10 @@ class NodePatchParser(NonSourceParser[NodeTarget, ParsedNodePatch], Generic[Node
         # We're not passing the ParsedNodePatch around anymore, so we
         # could possibly skip creating one. Leaving here for now for
         # code consistency.
+        deprecation_date: Optional[datetime.datetime] = None
+        if isinstance(block.target, UnparsedModelUpdate):
+            deprecation_date = block.target.deprecation_date
+
         patch = ParsedNodePatch(
             name=block.target.name,
             original_file_path=block.target.original_file_path,
@@ -914,7 +919,9 @@ class NodePatchParser(NonSourceParser[NodeTarget, ParsedNodePatch], Generic[Node
             access=block.target.access,
             version=None,
             latest_version=None,
+            deprecation_date=deprecation_date,
         )
+
         assert isinstance(self.yaml.file, SchemaSourceFile)
         source_file: SchemaSourceFile = self.yaml.file
         if patch.yaml_key in ["models", "seeds", "snapshots"]:
@@ -1163,6 +1170,7 @@ class ModelPatchParser(NodePatchParser[UnparsedModelUpdate]):
                     access=unparsed_version.access or target.access,
                     version=unparsed_version.v,
                     latest_version=latest_version,
+                    deprecation_date=unparsed_version.deprecation_date,
                 )
                 # Node patched before config because config patching depends on model name,
                 # which may have been updated in the version patch
