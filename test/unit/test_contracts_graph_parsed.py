@@ -1,3 +1,4 @@
+import datetime
 import pickle
 import pytest
 
@@ -785,6 +786,7 @@ def basic_parsed_model_patch_dict():
         "access": "public",
         "version": "1",
         "latest_version": "1",
+        "deprecation_date": "2020-01-01T00:00:00+00:00",
     }
 
 
@@ -803,6 +805,7 @@ def basic_parsed_model_patch_object():
         access="public",
         version="1",
         latest_version="1",
+        deprecation_date=datetime.datetime(2020, 1, 1, 0, 0, 0, 0, tzinfo=datetime.timezone.utc),
     )
 
 
@@ -837,6 +840,7 @@ def patched_model_object():
         access=AccessType.Public,
         version="1",
         latest_version="1",
+        deprecation_date=datetime.datetime(2020, 1, 1, 0, 0, 0, 0, tzinfo=datetime.timezone.utc),
     )
 
 
@@ -1921,6 +1925,7 @@ def populated_parsed_node_patch_dict():
         "access": "public",
         "version": "1",
         "latest_version": "1",
+        "deprecation_date": "2020-01-01T00:00:00+00:00",
     }
 
 
@@ -1939,6 +1944,7 @@ def populated_parsed_node_patch_object():
         access="public",
         version="1",
         latest_version="1",
+        deprecation_date=datetime.datetime(2020, 1, 1, 0, 0, 0, 0, tzinfo=datetime.timezone.utc),
     )
 
 
