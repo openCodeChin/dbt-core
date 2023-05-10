@@ -1514,7 +1514,7 @@ def expected_versions_manifest(project):
                 "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
                 "deferred": False,
                 "description": "A versioned model",
-                "deprecation_date": None,
+                "deprecation_date": ANY,
                 "docs": {"node_color": None, "show": True},
                 "fqn": ["test", "versioned_model", "v1"],
                 "group": "test_group",

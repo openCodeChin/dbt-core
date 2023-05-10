@@ -539,11 +539,14 @@ class ManifestLoader:
     def check_for_model_deprecations(self):
         for node in self.manifest.nodes.values():
             if isinstance(node, ModelNode):
-                if node.deprecation_date and node.deprecation_date < datetime.datetime.now():
+                if (
+                    node.deprecation_date
+                    and node.deprecation_date < datetime.datetime.now().astimezone()
+                ):
                     fire_event(
                         DeprecatedModel(
                             model_name=node.name,
-                            model_version=node.version,
+                            model_version=str(node.version),
                             deprecation_date=node.deprecation_date.isoformat(),
                         )
                     )
@@ -553,7 +556,7 @@ class ManifestLoader:
                 for resolved_ref in resolved_model_refs:
                     if resolved_ref.deprecation_date:
 
-                        if resolved_ref.deprecation_date < datetime.datetime.now():
+                        if resolved_ref.deprecation_date < datetime.datetime.now().astimezone():
                             event_cls = DeprecatedReference
                         else:
                             event_cls = UpcomingReferenceDeprecation
@@ -563,8 +566,8 @@ class ManifestLoader:
                                 model_name=node.name,
                                 ref_model_package=resolved_ref.package_name,
                                 ref_model_name=resolved_ref.name,
-                                ref_model_version=resolved_ref.version,
-                                ref_model_latest_version=resolved_ref.latest_version,
+                                ref_model_version=str(resolved_ref.version),
+                                ref_model_latest_version=str(resolved_ref.latest_version),
                                 ref_model_deprecation_date=resolved_ref.deprecation_date.isoformat(),
                             )
                         )
