@@ -1151,11 +1151,12 @@ generate_name_parameter_sets = [
 
 
 @pytest.mark.parametrize("macros,expected", generate_name_parameter_sets, ids=id_macro)
-def test_find_generate_macro_by_name(macros, expected):
+def test_find_generate_macros_by_name(macros, expected):
     manifest = make_manifest(macros=macros)
-    result = manifest.find_generate_macro_by_name(
+    result = manifest.find_generate_macros_by_name(
         component="some_component", root_project_name="root"
     )
+    result = result[0] if result else None
     if expected is None:
         assert result is expected
     else:

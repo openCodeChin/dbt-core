@@ -71,24 +71,24 @@ class Parser(BaseParser[FinalValue], Generic[FinalValue]):
 
 class RelationUpdate:
     def __init__(self, config: RuntimeConfig, manifest: Manifest, component: str) -> None:
-        default_macro = manifest.find_default_generate_macro_by_name(
+        default_macros = manifest.find_generate_macros_by_name(
             component=component,
             root_project_name=config.project_name,
         )
-
-        package_macros = manifest.find_package_generate_macros_by_name(
-            component=component,
-            root_project_name=config.project_name,
-        )
-
-        if default_macro is None:
+        if not default_macros:
             raise DbtInternalError(f"No macro with name generate_{component}_name found")
 
+        default_macro = default_macros[0]
         default_macro_context = generate_generate_name_macro_context(
             default_macro, config, manifest
         )
         self.default_updater = MacroGenerator(default_macro, default_macro_context)
 
+        package_macros = manifest.find_generate_macros_by_name(
+            component=component,
+            root_project_name=config.project_name,
+            search_imported_packages=True,
+        )
         package_updaters = {}
         for package_macro in package_macros:
             imported_macro_context = generate_generate_name_macro_context(
