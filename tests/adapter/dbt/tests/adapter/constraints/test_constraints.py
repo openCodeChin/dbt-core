@@ -417,7 +417,7 @@ class TestModelConstraintsRuntimeEnforcement(BaseModelConstraintsRuntimeEnforcem
     pass
 
 
-class TestConstraintQuotedColumn(BaseConstraintsRuntimeDdlEnforcement):
+class BaseConstraintQuotedColumn(BaseConstraintsRuntimeDdlEnforcement):
     @pytest.fixture(scope="class")
     def models(self):
         return {
@@ -447,3 +447,7 @@ insert into <model_identifier> (
     ) as model_subq
 );
 """
+
+
+class TestConstraintQuotedColumn(BaseConstraintQuotedColumn):
+    pass
