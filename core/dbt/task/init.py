@@ -221,6 +221,13 @@ class InitTask(BaseTask):
     def ask_for_adapter_choice(self) -> str:
         """Ask the user which adapter (database) they'd like to use."""
         available_adapters = list(_get_adapter_plugin_names())
+
+        if not len(available_adapters):
+            click.echo(
+                "No adapters available. Learn how to install an adapter by going to https://docs.getdbt.com/docs/supported-data-platforms#adapter-installation"
+            )
+            sys.exit(1)
+
         prompt_msg = (
             "Which database would you like to use?\n"
             + "\n".join([f"[{n+1}] {v}" for n, v in enumerate(available_adapters)])
@@ -244,6 +251,22 @@ class InitTask(BaseTask):
 
         return name
 
+    def create_new_project(self, project_name: str):
+        self.copy_starter_repo(project_name)
+        os.chdir(project_name)
+        with open("dbt_project.yml", "r+") as f:
+            content = f"{f.read()}".format(project_name=project_name, profile_name=project_name)
+            f.seek(0)
+            f.write(content)
+            f.truncate()
+        fire_event(
+            ProjectCreated(
+                project_name=project_name,
+                docs_url=DOCS_URL,
+                slack_url=SLACK_URL,
+            )
+        )
+
     def run(self):
         """Entry point for the init task."""
         profiles_dir = get_flags().PROFILES_DIR
@@ -258,8 +281,20 @@ class InitTask(BaseTask):
         if in_project:
             # When dbt init is run inside an existing project,
             # just setup the user's profile.
-            fire_event(SettingUpProfile())
             profile_name = self.get_profile_name_from_current_project()
+        else:
+            # When dbt init is run outside of an existing project,
+            # create a new project and set up the user's profile.
+            project_name = self.get_valid_project_name()
+            project_path = Path(project_name)
+            if project_path.exists():
+                fire_event(ProjectNameAlreadyExists(name=project_name))
+                return
+            profile_name = self.create_new_project(project_name)
+
+        # Ask for adapter only if skip_profile_setup flag is not provided.
+        if not self.args.skip_profile_setup:
+            fire_event(SettingUpProfile())
             if not self.check_if_can_write_profile(profile_name=profile_name):
                 return
             # If a profile_template.yml exists in the project root, that effectively
@@ -275,38 +310,3 @@ class InitTask(BaseTask):
                     fire_event(InvalidProfileTemplateYAML())
             adapter = self.ask_for_adapter_choice()
             self.create_profile_from_target(adapter, profile_name=profile_name)
-            return
-
-        # When dbt init is run outside of an existing project,
-        # create a new project and set up the user's profile.
-        available_adapters = list(_get_adapter_plugin_names())
-        if not len(available_adapters):
-            print("No adapters available. Go to https://docs.getdbt.com/docs/available-adapters")
-            sys.exit(1)
-        project_name = self.get_valid_project_name()
-        project_path = Path(project_name)
-        if project_path.exists():
-            fire_event(ProjectNameAlreadyExists(name=project_name))
-            return
-
-        self.copy_starter_repo(project_name)
-        os.chdir(project_name)
-        with open("dbt_project.yml", "r+") as f:
-            content = f"{f.read()}".format(project_name=project_name, profile_name=project_name)
-            f.seek(0)
-            f.write(content)
-            f.truncate()
-
-        # Ask for adapter only if skip_profile_setup flag is not provided.
-        if not self.args.skip_profile_setup:
-            if not self.check_if_can_write_profile(profile_name=project_name):
-                return
-            adapter = self.ask_for_adapter_choice()
-            self.create_profile_from_target(adapter, profile_name=project_name)
-            fire_event(
-                ProjectCreated(
-                    project_name=project_name,
-                    docs_url=DOCS_URL,
-                    slack_url=SLACK_URL,
-                )
-            )
