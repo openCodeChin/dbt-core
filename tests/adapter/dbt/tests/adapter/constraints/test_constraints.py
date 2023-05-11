@@ -184,6 +184,7 @@ class BaseConstraintsRuntimeDdlEnforcement:
         return {
             "my_model.sql": my_model_wrong_order_depends_on_fk_sql,
             "foreign_key_model.sql": foreign_key_model_sql,
+            "constraints_schema.yml": model_fk_constraint_schema_yml,
         }
 
     @pytest.fixture(scope="class")
@@ -216,8 +217,9 @@ insert into <model_identifier> (
 """
 
     def test__constraints_ddl(self, project, expected_sql):
+        unformatted_constraint_schema_yml = read_file("models", "constraints_schema.yml")
         write_file(
-            model_fk_constraint_schema_yml.format(schema=project.test_schema),
+            unformatted_constraint_schema_yml.format(schema=project.test_schema),
             "models",
             "constraints_schema.yml",
         )
@@ -332,6 +334,7 @@ class BaseIncrementalConstraintsRuntimeDdlEnforcement(BaseConstraintsRuntimeDdlE
         return {
             "my_model.sql": my_model_incremental_wrong_order_depends_on_fk_sql,
             "foreign_key_model.sql": foreign_key_model_sql,
+            "constraints_schema.yml": model_fk_constraint_schema_yml,
         }
 
 
@@ -428,8 +431,9 @@ insert into <model_identifier> (
 """
 
     def test__model_constraints_ddl(self, project, expected_sql):
+        unformatted_constraint_schema_yml = read_file("models", "constraints_schema.yml")
         write_file(
-            constrained_model_schema_yml.format(schema=project.test_schema),
+            unformatted_constraint_schema_yml.format(schema=project.test_schema),
             "models",
             "constraints_schema.yml",
         )

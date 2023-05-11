@@ -400,6 +400,7 @@ models:
         data_type: integer
         constraints:
           - type: unique
+          - type: primary_key
 """
 
 constrained_model_schema_yml = """
@@ -444,6 +445,7 @@ models:
         data_type: integer
         constraints:
           - type: unique
+          - type: primary_key
 """
 
 
