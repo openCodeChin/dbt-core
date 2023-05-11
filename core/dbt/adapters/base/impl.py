@@ -1340,7 +1340,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         rendered_column_constraints = []
 
         for v in raw_columns.values():
-            col_name = cls.quote(cls, v["name"]) if v.get("quote") else v["name"]
+            col_name = cls.quote(v["name"]) if v.get("quote") else v["name"]
             rendered_column_constraint = [f"{col_name} {v['data_type']}"]
             for con in v.get("constraints", None):
                 constraint = cls._parse_column_constraint(con)

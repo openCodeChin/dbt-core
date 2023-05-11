@@ -183,7 +183,7 @@ select
 # 'from' is a reserved word, so it must be quoted
 my_model_with_quoted_column_name_sql = """
 select
-  'blue' as "from",
+  'blue' as {{ adapter.quote('from') }},
   1 as id,
   '2019-01-01' as date_day
 """
