@@ -290,7 +290,8 @@ class InitTask(BaseTask):
             if project_path.exists():
                 fire_event(ProjectNameAlreadyExists(name=project_name))
                 return
-            profile_name = self.create_new_project(project_name)
+            self.create_new_project(project_name)
+            profile_name = project_name
 
         # Ask for adapter only if skip_profile_setup flag is not provided.
         if not self.args.skip_profile_setup:
