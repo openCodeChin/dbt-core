@@ -37,7 +37,7 @@ from dbt.contracts.graph.nodes import (
     GraphMemberNode,
     ResultNode,
     BaseNode,
-    RelationalNode,
+    StateRelation,
     ManifestOrPublicNode,
 )
 from dbt.contracts.graph.unparsed import SourcePatch, NodeVersion, UnparsedVersion
@@ -1119,7 +1119,7 @@ class Manifest(MacroMethods, DataClassMessagePackMixin, dbtClassMixin):
             current = self.nodes.get(unique_id)
             if current and (node.resource_type in refables and not node.is_ephemeral):
                 other_node = other.nodes[unique_id]
-                state_relation = RelationalNode(
+                state_relation = StateRelation(
                     other_node.database, other_node.schema, other_node.alias
                 )
                 self.nodes[unique_id] = current.replace(state_relation=state_relation)
