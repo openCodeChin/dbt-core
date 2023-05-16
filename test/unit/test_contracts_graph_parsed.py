@@ -150,7 +150,7 @@ def base_parsed_model_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": []},
+        "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
         "database": "test_db",
         "description": "",
         "schema": "test_schema",
@@ -184,6 +184,7 @@ def base_parsed_model_dict():
         "unrendered_config": {},
         "config_call_dict": {},
         "access": AccessType.Protected.value,
+        "constraints": [],
     }
 
 
@@ -255,7 +256,7 @@ def complex_parsed_model_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": ["model.test.bar"]},
+        "depends_on": {"macros": [], "nodes": ["model.test.bar"], "public_nodes": []},
         "database": "test_db",
         "deferred": True,
         "description": "My parsed node",
@@ -301,6 +302,7 @@ def complex_parsed_model_dict():
         },
         "config_call_dict": {},
         "access": AccessType.Protected.value,
+        "constraints": [],
     }
 
 
@@ -482,13 +484,13 @@ changed_nodes = [
 @pytest.mark.parametrize("func", unchanged_nodes)
 def test_compare_unchanged_parsed_model(func, basic_parsed_model_object):
     node, compare = func(basic_parsed_model_object)
-    assert node.same_contents(compare)
+    assert node.same_contents(compare, "postgres")
 
 
 @pytest.mark.parametrize("func", changed_nodes)
 def test_compare_changed_model(func, basic_parsed_model_object):
     node, compare = func(basic_parsed_model_object)
-    assert not node.same_contents(compare)
+    assert not node.same_contents(compare, "postgres")
 
 
 @pytest.fixture
@@ -751,13 +753,13 @@ changed_seeds = [
 @pytest.mark.parametrize("func", unchanged_seeds)
 def test_compare_unchanged_parsed_seed(func, basic_parsed_seed_object):
     node, compare = func(basic_parsed_seed_object)
-    assert node.same_contents(compare)
+    assert node.same_contents(compare, "postgres")
 
 
 @pytest.mark.parametrize("func", changed_seeds)
 def test_compare_changed_seed(func, basic_parsed_seed_object):
     node, compare = func(basic_parsed_seed_object)
-    assert not node.same_contents(compare)
+    assert not node.same_contents(compare, "postgres")
 
 
 @pytest.fixture
@@ -781,6 +783,8 @@ def basic_parsed_model_patch_dict():
         },
         "config": {},
         "access": "public",
+        "version": "1",
+        "latest_version": "1",
     }
 
 
@@ -797,6 +801,8 @@ def basic_parsed_model_patch_object():
         meta={},
         config={},
         access="public",
+        version="1",
+        latest_version="1",
     )
 
 
@@ -829,6 +835,8 @@ def patched_model_object():
         checksum=FileHash.from_contents(""),
         unrendered_config={},
         access=AccessType.Public,
+        version="1",
+        latest_version="1",
     )
 
 
@@ -880,7 +888,7 @@ def base_parsed_hook_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": []},
+        "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
         "database": "test_db",
         "deferred": False,
         "description": "",
@@ -961,7 +969,7 @@ def complex_parsed_hook_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": ["model.test.bar"]},
+        "depends_on": {"macros": [], "nodes": ["model.test.bar"], "public_nodes": []},
         "deferred": False,
         "database": "test_db",
         "description": "My parsed node",
@@ -1119,7 +1127,7 @@ def basic_parsed_schema_test_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": []},
+        "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
         "deferred": False,
         "database": "test_db",
         "description": "",
@@ -1198,7 +1206,7 @@ def complex_parsed_schema_test_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": ["model.test.bar"]},
+        "depends_on": {"macros": [], "nodes": ["model.test.bar"], "public_nodes": []},
         "database": "test_db",
         "deferred": False,
         "description": "My parsed node",
@@ -1568,7 +1576,7 @@ def basic_timestamp_snapshot_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": []},
+        "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
         "deferred": False,
         "database": "test_db",
         "description": "",
@@ -1715,7 +1723,7 @@ def basic_check_snapshot_dict():
         "refs": [],
         "sources": [],
         "metrics": [],
-        "depends_on": {"macros": [], "nodes": []},
+        "depends_on": {"macros": [], "nodes": [], "public_nodes": []},
         "database": "test_db",
         "deferred": False,
         "description": "",
@@ -1911,6 +1919,8 @@ def populated_parsed_node_patch_dict():
         "package_name": "test",
         "config": {},
         "access": "public",
+        "version": "1",
+        "latest_version": "1",
     }
 
 
@@ -1927,6 +1937,8 @@ def populated_parsed_node_patch_object():
         docs=Docs(show=False),
         config={},
         access="public",
+        version="1",
+        latest_version="1",
     )
 
 
@@ -2286,6 +2298,7 @@ def basic_parsed_exposure_dict():
         "depends_on": {
             "nodes": [],
             "macros": [],
+            "public_nodes": [],
         },
         "refs": [],
         "sources": [],
@@ -2345,6 +2358,7 @@ def complex_parsed_exposure_dict():
         "depends_on": {
             "nodes": ["models.test.my_model"],
             "macros": [],
+            "public_nodes": [],
         },
         "refs": [],
         "sources": [],
@@ -2478,6 +2492,7 @@ def basic_parsed_metric_dict():
         "depends_on": {
             "nodes": [],
             "macros": [],
+            "public_nodes": [],
         },
     }
 
