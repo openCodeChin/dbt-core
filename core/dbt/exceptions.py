@@ -414,7 +414,7 @@ class PublicationConfigNotFound(DbtConfigError):
     def message(self):
         return (
             f"A dependency on project {self.project} was specified, "
-            f"but an artifact for {self.project} was not found."
+            f"but a publication for {self.project} was not found."
         )
 
 
