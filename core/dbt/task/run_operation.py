@@ -1,19 +1,25 @@
-from datetime import datetime
+import os
+import threading
 import traceback
+from datetime import datetime
 
 import agate
 
-from .base import ConfiguredTask
-
 import dbt.exceptions
 from dbt.adapters.factory import get_adapter
-from dbt.contracts.results import RunOperationResultsArtifact
+from dbt.contracts.files import FileHash
+from dbt.contracts.graph.nodes import HookNode
+from dbt.contracts.results import RunResultsArtifact, RunResult, RunStatus, TimingInfo
 from dbt.events.functions import fire_event
 from dbt.events.types import (
     RunningOperationCaughtError,
     RunningOperationUncaughtError,
     LogDebugStackTrace,
 )
+from dbt.node_types import NodeType
+from .base import ConfiguredTask
+
+RESULT_FILE_NAME = "run_results.json"
 
 
 class RunOperationTask(ConfiguredTask):
@@ -22,9 +28,12 @@ class RunOperationTask(ConfiguredTask):
         if "." in macro_name:
             package_name, macro_name = macro_name.split(".", 1)
         else:
-            package_name = None
+            package_name = self.config.project_name
 
         return package_name, macro_name
+
+    def result_path(self):
+        return os.path.join(self.config.target_path, RESULT_FILE_NAME)
 
     def _run_unsafe(self) -> agate.Table:
         adapter = get_adapter(self.config)
@@ -40,7 +49,7 @@ class RunOperationTask(ConfiguredTask):
 
         return res
 
-    def run(self) -> RunOperationResultsArtifact:
+    def run(self) -> RunResultsArtifact:
         start = datetime.utcnow()
         self.compile_manifest()
         try:
@@ -56,11 +65,46 @@ class RunOperationTask(ConfiguredTask):
         else:
             success = True
         end = datetime.utcnow()
-        return RunOperationResultsArtifact.from_success(
-            generated_at=end,
-            elapsed_time=(end - start).total_seconds(),
-            success=success,
+
+        package_name, macro_name = self._get_macro_parts()
+        fqn = [NodeType.Operation, package_name, macro_name]
+        unique_id = ".".join(fqn)
+
+        run_result = RunResult(
+            adapter_response={},
+            status=RunStatus.Success if success else RunStatus.Error,
+            execution_time=(end - start).total_seconds(),
+            failures=0 if success else 1,
+            message=None,
+            node=HookNode(
+                alias=macro_name,
+                checksum=FileHash.from_contents(unique_id),
+                database=self.config.credentials.database,
+                schema=self.config.credentials.schema,
+                resource_type=NodeType.Operation,
+                fqn=fqn,
+                name=macro_name,
+                unique_id=unique_id,
+                package_name=package_name,
+                path="",
+                original_file_path="",
+            ),
+            thread_id=threading.current_thread().name,
+            timing=[TimingInfo(name=macro_name, started_at=start, completed_at=end)],
         )
 
+        results = RunResultsArtifact.from_execution_results(
+            generated_at=end,
+            elapsed_time=(end - start).total_seconds(),
+            args={
+                k: v
+                for k, v in self.args.__dict__.items()
+                if k.islower() and type(v) in (str, int, float, bool, list, dict)
+            },
+            results=[run_result],
+        )
+        results.write(self.result_path())
+        return results
+
     def interpret_results(self, results):
-        return results.success
+        return results.results[0].status == RunStatus.Success
